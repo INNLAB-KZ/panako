@@ -95,6 +95,13 @@ public class MonitorHandler implements HttpHandler {
 
 				List<QueryResult> allResults = monitorWithAbsoluteTimes(strategy, filePath, stepSize, overlap);
 
+				// Filter by ISRCs if specified
+				String isrcsParam = params.get("isrcs");
+				if (isrcsParam != null && !isrcsParam.isEmpty()) {
+					Set<String> filterIsrcs = parseIsrcsParam(isrcsParam);
+					allResults = filterByIsrcs(allResults, filterIsrcs);
+				}
+
 				long processingTimeMs = System.currentTimeMillis() - startTime;
 
 				String json = buildResponseJson(strategy, allResults, filePath, processingTimeMs);
@@ -132,10 +139,121 @@ public class MonitorHandler implements HttpHandler {
 		int maxResults = Config.getInt(Key.NUMBER_OF_QUERY_RESULTS);
 		int parallelism = Config.getInt(Key.MONITOR_PARALLEL_WINDOWS);
 
+		// Pass 1: coarse scan
+		List<QueryResult> pass1Results;
 		if (parallelism <= 1) {
-			return monitorSequential(strategy, filePath, stepSize, actualStep, maxResults, totalDuration);
+			pass1Results = monitorSequential(strategy, filePath, stepSize, actualStep, maxResults, totalDuration);
+		} else {
+			pass1Results = monitorParallel(strategy, filePath, stepSize, actualStep, maxResults, totalDuration, parallelism);
 		}
-		return monitorParallel(strategy, filePath, stepSize, actualStep, maxResults, totalDuration, parallelism);
+
+		// Find gaps — time ranges not covered by any match
+		// Skip pass 2 if pass 1 found nothing (no point scanning entire file again)
+		List<double[]> gaps = pass1Results.isEmpty()
+				? Collections.emptyList()
+				: findGaps(pass1Results, totalDuration, stepSize);
+		if (gaps.isEmpty()) {
+			return pass1Results;
+		}
+
+		// Pass 2: fine scan on gaps only
+		int fineStep = Config.getInt(Key.MONITOR_STEP_SIZE_FINE);
+		int fineOverlap = Config.getInt(Key.MONITOR_OVERLAP_FINE);
+		int fineActualStep = fineStep - fineOverlap;
+
+		List<QueryResult> pass2Results = new ArrayList<>();
+		for (double[] gap : gaps) {
+			double gapStart = gap[0];
+			double gapEnd = gap[1];
+			double gapDuration = gapEnd - gapStart;
+			if (gapDuration < fineStep) continue;
+
+			// Extract gap region and scan with fine windows
+			for (double t = gapStart; t + fineStep <= gapEnd; t += fineActualStep) {
+				Path chunk = extractAudioChunkDouble(filePath, t, fineStep);
+				try {
+					CollectingResultHandler handler = new CollectingResultHandler();
+					strategy.query(chunk.toAbsolutePath().toString(), maxResults, new HashSet<>(), handler);
+
+					for (QueryResult r : handler.results) {
+						pass2Results.add(new QueryResult(
+								r.queryPath, r.queryStart + t, r.queryStop + t,
+								r.refPath, r.refIdentifier, r.refStart, r.refStop,
+								r.score, r.timeFactor, r.frequencyFactor,
+								r.percentOfSecondsWithMatches));
+					}
+				} finally {
+					try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
+				}
+			}
+		}
+
+		// Merge pass1 + pass2, deduplicate by identifier + time overlap
+		List<QueryResult> allResults = new ArrayList<>(pass1Results);
+		for (QueryResult r2 : pass2Results) {
+			boolean duplicate = false;
+			for (QueryResult r1 : pass1Results) {
+				if (r1.refIdentifier.equals(r2.refIdentifier)
+						&& r2.queryStart >= r1.queryStart - 5
+						&& r2.queryStop <= r1.queryStop + 5) {
+					duplicate = true;
+					break;
+				}
+			}
+			if (!duplicate) {
+				allResults.add(r2);
+			}
+		}
+
+		return allResults;
+	}
+
+	/**
+	 * Find time gaps not covered by any query result.
+	 * Returns list of [gapStart, gapEnd] pairs.
+	 */
+	private static List<double[]> findGaps(List<QueryResult> results, double totalDuration, int stepSize) {
+		if (results.isEmpty()) {
+			return List.of(new double[]{0, totalDuration});
+		}
+
+		// Build covered intervals from results
+		List<double[]> covered = new ArrayList<>();
+		for (QueryResult r : results) {
+			covered.add(new double[]{r.queryStart, r.queryStop});
+		}
+		covered.sort(Comparator.comparingDouble(a -> a[0]));
+
+		// Merge overlapping intervals
+		List<double[]> merged = new ArrayList<>();
+		double[] cur = covered.get(0);
+		for (int i = 1; i < covered.size(); i++) {
+			if (covered.get(i)[0] <= cur[1]) {
+				cur[1] = Math.max(cur[1], covered.get(i)[1]);
+			} else {
+				merged.add(cur);
+				cur = covered.get(i);
+			}
+		}
+		merged.add(cur);
+
+		// Find gaps between merged intervals
+		List<double[]> gaps = new ArrayList<>();
+		if (merged.get(0)[0] > 0) {
+			gaps.add(new double[]{0, merged.get(0)[0]});
+		}
+		for (int i = 1; i < merged.size(); i++) {
+			double gapStart = merged.get(i - 1)[1];
+			double gapEnd = merged.get(i)[0];
+			if (gapEnd - gapStart > 0) {
+				gaps.add(new double[]{gapStart, gapEnd});
+			}
+		}
+		if (merged.get(merged.size() - 1)[1] < totalDuration) {
+			gaps.add(new double[]{merged.get(merged.size() - 1)[1], totalDuration});
+		}
+
+		return gaps;
 	}
 
 	private static List<QueryResult> monitorSequential(Strategy strategy, String filePath,
@@ -613,5 +731,33 @@ public class MonitorHandler implements HttpHandler {
 		public void handleEmptyResult(QueryResult result) {
 			// No match for this window — skip
 		}
+	}
+
+	/**
+	 * Parse comma-separated ISRCs from a parameter value.
+	 */
+	static Set<String> parseIsrcsParam(String isrcsParam) {
+		Set<String> isrcs = new HashSet<>();
+		for (String s : isrcsParam.split(",")) {
+			String trimmed = s.trim();
+			if (!trimmed.isEmpty()) {
+				isrcs.add(trimmed);
+			}
+		}
+		return isrcs;
+	}
+
+	/**
+	 * Filter query results to only include matches for the given ISRCs.
+	 */
+	static List<QueryResult> filterByIsrcs(List<QueryResult> results, Set<String> isrcs) {
+		List<QueryResult> filtered = new ArrayList<>();
+		for (QueryResult r : results) {
+			String isrc = HttpUtil.extractIsrc(r.refPath);
+			if (isrc != null && isrcs.contains(isrc)) {
+				filtered.add(r);
+			}
+		}
+		return filtered;
 	}
 }

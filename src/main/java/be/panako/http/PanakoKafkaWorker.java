@@ -67,8 +67,8 @@ public class PanakoKafkaWorker implements Runnable {
 
 		this.storeRequestTopic = Config.get(Key.KAFKA_STORE_REQUEST_TOPIC);
 		this.storeResultTopic = Config.get(Key.KAFKA_STORE_RESULT_TOPIC);
-		this.monitorRequestTopic = Config.get(Key.KAFKA_MONITOR_REQUEST_TOPIC);
-		this.monitorResultTopic = Config.get(Key.KAFKA_MONITOR_RESULT_TOPIC);
+		this.monitorRequestTopic = Config.get(Key.KAFKA_REQUEST_TOPIC);
+		this.monitorResultTopic = Config.get(Key.KAFKA_RESPONSE_TOPIC);
 
 		// Consumer config
 		Properties consumerProps = new Properties();
@@ -98,8 +98,12 @@ public class PanakoKafkaWorker implements Runnable {
 
 	@Override
 	public void run() {
-		consumer.subscribe(Arrays.asList(storeRequestTopic, monitorRequestTopic));
-		LOG.info("Kafka worker started — listening on [" + storeRequestTopic + ", " + monitorRequestTopic + "]");
+		String mode = Config.get(Key.KAFKA_MODE).toUpperCase();
+		List<String> topics = new ArrayList<>();
+		if (mode.equals("ALL") || mode.equals("STORE")) topics.add(storeRequestTopic);
+		if (mode.equals("ALL") || mode.equals("MONITOR")) topics.add(monitorRequestTopic);
+		consumer.subscribe(topics);
+		LOG.info("Kafka worker started (mode=" + mode + ") — listening on " + topics);
 
 		try {
 			while (running) {
@@ -133,7 +137,8 @@ public class PanakoKafkaWorker implements Runnable {
 		String body = record.value();
 		String audioUrl = extractJsonString(body, "audio_url");
 		String filename = extractJsonString(body, "filename");
-		String requestId = extractJsonString(body, "request_id");
+		String requestId = extractJsonString(body, "recording_id");
+		if (requestId == null) requestId = extractJsonString(body, "request_id");
 
 		if (audioUrl == null || audioUrl.isEmpty()) {
 			sendError(storeResultTopic, requestId, "Missing 'audio_url'");
@@ -222,10 +227,10 @@ public class PanakoKafkaWorker implements Runnable {
 	private void handleMonitorRequest(ConsumerRecord<String, String> record) {
 		String body = record.value();
 		String audioUrl = extractJsonString(body, "audio_url");
-		String requestId = extractJsonString(body, "request_id");
+		String recordingId = extractJsonString(body, "recording_id");
 
 		if (audioUrl == null || audioUrl.isEmpty()) {
-			sendError(monitorResultTopic, requestId, "Missing 'audio_url'");
+			sendError(monitorResultTopic, recordingId, "Missing 'audio_url'");
 			return;
 		}
 
@@ -244,7 +249,7 @@ public class PanakoKafkaWorker implements Runnable {
 				downloadFile(audioUrl, tempFile, maxBytes);
 			} catch (IOException e) {
 				Files.deleteIfExists(tempFile);
-				sendError(monitorResultTopic, requestId, "Download failed: " + e.getMessage());
+				sendError(monitorResultTopic, recordingId, "Download failed: " + e.getMessage());
 				return;
 			}
 			audioFile = tempFile;
@@ -252,21 +257,23 @@ public class PanakoKafkaWorker implements Runnable {
 			long startTime = System.currentTimeMillis();
 			String filePath = audioFile.toAbsolutePath().toString();
 
+			double totalDuration = MonitorHandler.getAudioDuration(filePath);
 			List<QueryResult> allResults = MonitorHandler.monitorWithAbsoluteTimes(strategy, filePath);
 			long processingTimeMs = System.currentTimeMillis() - startTime;
 
-			// Build response with request_id prepended
+			// Build response with recording_id and duration_seconds prepended
 			String monitorJson = MonitorHandler.buildResponseJson(strategy, allResults, filePath, processingTimeMs);
-			// Inject request_id into the JSON
-			String json = "{\"request_id\":\"" + HttpUtil.escapeJson(requestId != null ? requestId : "") + "\"," +
+			// Inject recording_id and duration_seconds into the JSON
+			String json = "{\"recording_id\":\"" + HttpUtil.escapeJson(recordingId != null ? recordingId : "") + "\"," +
+					"\"duration_seconds\":" + String.format("%.1f", totalDuration) + "," +
 					monitorJson.substring(1);
 
-			send(monitorResultTopic, requestId, json);
+			send(monitorResultTopic, recordingId, json);
 			LOG.info("Kafka monitor completed: " + filename + " in " + processingTimeMs + "ms");
 
 		} catch (Exception e) {
 			LOG.log(Level.SEVERE, "Kafka monitor failed for " + audioUrl, e);
-			sendError(monitorResultTopic, requestId, e.getMessage());
+			sendError(monitorResultTopic, recordingId, e.getMessage());
 		} finally {
 			if (audioFile != null) {
 				try { Files.deleteIfExists(audioFile); } catch (IOException ignored) {}
@@ -282,11 +289,11 @@ public class PanakoKafkaWorker implements Runnable {
 		});
 	}
 
-	private void sendError(String topic, String requestId, String message) {
+	private void sendError(String topic, String recordingId, String message) {
 		String json = "{\"status\":\"error\"" +
-				",\"request_id\":\"" + HttpUtil.escapeJson(requestId != null ? requestId : "") + "\"" +
-				",\"message\":\"" + HttpUtil.escapeJson(message != null ? message : "unknown") + "\"}";
-		send(topic, requestId, json);
+				",\"recording_id\":\"" + HttpUtil.escapeJson(recordingId != null ? recordingId : "") + "\"" +
+				",\"error\":\"" + HttpUtil.escapeJson(message != null ? message : "unknown") + "\"}";
+		send(topic, recordingId, json);
 	}
 
 	private void downloadFile(String urlString, Path target, long maxBytes) throws IOException {

@@ -162,3 +162,5 @@ SELECT table, formatReadableSize(total_bytes) FROM system.tables WHERE database 
 ## License
 
 AGPL-3.0 (based on upstream Panako).
+
+docker compose kill panako-api && docker compose up -d panako-api 

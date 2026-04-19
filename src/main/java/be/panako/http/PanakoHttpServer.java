@@ -82,17 +82,17 @@ public class PanakoHttpServer {
 		this.server = HttpServer.create(new InetSocketAddress(port), 0);
 		this.server.setExecutor(executor);
 
-		// Register endpoints
+		// Register endpoints (health is public, everything else requires API key)
 		server.createContext("/api/v1/health", new HealthHandler());
-		server.createContext("/api/v1/stats", new StatsHandler(strategy));
-		server.createContext("/api/v1/store/fingerprints", new StoreFingerprintsHandler(writeLock));
-		server.createContext("/api/v1/store/url", new StoreUrlHandler(strategy, writeLock, maxUploadSizeMB));
-		server.createContext("/api/v1/store", new StoreHandler(strategy, writeLock, maxUploadSizeMB));
-		server.createContext("/api/v1/query/fingerprints", new QueryFingerprintsHandler());
-		server.createContext("/api/v1/query", new QueryHandler(strategy, maxUploadSizeMB));
-		server.createContext("/api/v1/monitor/url", new MonitorUrlHandler(strategy, maxUploadSizeMB));
-		server.createContext("/api/v1/monitor", new MonitorHandler(strategy, maxUploadSizeMB));
-		server.createContext("/api/v1/delete", new DeleteHandler(strategy, writeLock, maxUploadSizeMB));
+		server.createContext("/api/v1/stats", new ApiKeyFilter(new StatsHandler(strategy)));
+		server.createContext("/api/v1/store/fingerprints", new ApiKeyFilter(new StoreFingerprintsHandler(writeLock)));
+		server.createContext("/api/v1/store/url", new ApiKeyFilter(new StoreUrlHandler(strategy, writeLock, maxUploadSizeMB)));
+		server.createContext("/api/v1/store", new ApiKeyFilter(new StoreHandler(strategy, writeLock, maxUploadSizeMB)));
+		server.createContext("/api/v1/query/fingerprints", new ApiKeyFilter(new QueryFingerprintsHandler()));
+		server.createContext("/api/v1/query", new ApiKeyFilter(new QueryHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/monitor/url", new ApiKeyFilter(new MonitorUrlHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/monitor", new ApiKeyFilter(new MonitorHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/delete", new ApiKeyFilter(new DeleteHandler(strategy, writeLock, maxUploadSizeMB)));
 
 		LOG.info(String.format("Panako HTTP server configured on port %d with %d threads", port, threadPoolSize));
 	}
