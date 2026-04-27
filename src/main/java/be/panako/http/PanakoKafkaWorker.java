@@ -27,16 +27,32 @@ import java.util.logging.Logger;
 /**
  * Kafka consumer/producer for async store and monitor operations.
  *
+ * <p>Worker modes (selected via {@code PANAKO_WORKER_MODE} env var / system property):</p>
+ * <ul>
+ *   <li>{@code stage1} (default) — subscribes to {@link Key#KAFKA_REQUEST_TOPIC}
+ *       (default {@code panako.monitor.request}) and publishes to
+ *       {@link Key#KAFKA_RESPONSE_TOPIC} (default {@code panako.monitor.response}).
+ *       Also handles store topics when {@code KAFKA_MODE=ALL|STORE}.</li>
+ *   <li>{@code refine} — dedicated pool for Stage 3 refine requests. Subscribes
+ *       only to {@code panako.monitor.refine.request} and publishes to
+ *       {@code panako.monitor.refine.response}. Uses consumer group
+ *       {@code panako-worker-refine} so it does not compete with stage1 workers.
+ *       Store topics are ignored in this mode.</li>
+ * </ul>
+ *
+ * <p>Request/response schemas are identical in both modes — only the topic names
+ * and consumer group differ.</p>
+ *
  * <p>Consumes from:</p>
  * <ul>
- *   <li>{@code panako-store-requests} — store audio by URL</li>
- *   <li>{@code panako-monitor-requests} — monitor audio by URL</li>
+ *   <li>{@code panako-store-requests} — store audio by URL (stage1 only)</li>
+ *   <li>{@code panako.monitor.request} or {@code panako.monitor.refine.request} — monitor audio by URL</li>
  * </ul>
  *
  * <p>Produces to:</p>
  * <ul>
- *   <li>{@code panako-store-results} — store results</li>
- *   <li>{@code panako-monitor-results} — monitor results</li>
+ *   <li>{@code panako-store-results} — store results (stage1 only)</li>
+ *   <li>{@code panako.monitor.response} or {@code panako.monitor.refine.response} — monitor results</li>
  * </ul>
  *
  * <p>Request format (JSON):</p>
@@ -45,6 +61,20 @@ import java.util.logging.Logger;
 public class PanakoKafkaWorker implements Runnable {
 
 	private static final Logger LOG = Logger.getLogger(PanakoKafkaWorker.class.getName());
+
+	/** Worker modes — see class-level javadoc. */
+	public static final String MODE_STAGE1 = "stage1";
+	public static final String MODE_REFINE = "refine";
+	/** Pseudo-mode handled at launcher level: spawn both stage1 and refine pools
+	 *  inside the same JVM. A single {@link PanakoKafkaWorker} instance is always
+	 *  one concrete mode — never "both". */
+	public static final String MODE_BOTH = "both";
+
+	/** Dedicated topics/group for refine mode. Kept as constants (not Key entries)
+	 *  so we don't need to touch upstream {@code be.panako.util.Key}. */
+	private static final String REFINE_REQUEST_TOPIC = "panako.monitor.refine.request";
+	private static final String REFINE_RESPONSE_TOPIC = "panako.monitor.refine.response";
+	private static final String REFINE_GROUP_ID = "panako-worker-refine";
 
 	private final Strategy strategy;
 	private final ReentrantLock writeLock;
@@ -55,20 +85,81 @@ public class PanakoKafkaWorker implements Runnable {
 	private final String storeResultTopic;
 	private final String monitorRequestTopic;
 	private final String monitorResultTopic;
+	private final String workerMode;
 	private volatile boolean running = true;
 
+	/**
+	 * Resolve {@code PANAKO_WORKER_MODE} from env var / system property.
+	 * Returns a lowercased, validated mode — defaults to {@link #MODE_STAGE1}.
+	 * Possible values: {@link #MODE_STAGE1}, {@link #MODE_REFINE}, {@link #MODE_BOTH}.
+	 */
+	static String resolveWorkerMode() {
+		String raw = System.getProperty("PANAKO_WORKER_MODE");
+		if (raw == null) raw = System.getenv("PANAKO_WORKER_MODE");
+		if (raw == null) return MODE_STAGE1;
+		String normalized = raw.trim().toLowerCase();
+		if (normalized.isEmpty()) return MODE_STAGE1;
+		if (!normalized.equals(MODE_STAGE1) && !normalized.equals(MODE_REFINE) && !normalized.equals(MODE_BOTH)) {
+			LOG.warning("Unknown PANAKO_WORKER_MODE='" + raw + "' — falling back to '" + MODE_STAGE1 + "'");
+			return MODE_STAGE1;
+		}
+		return normalized;
+	}
+
+	/** Collapse {@link #MODE_BOTH} to a concrete per-instance mode ({@link #MODE_STAGE1})
+	 *  for the default constructor path. The launcher is responsible for splitting
+	 *  "both" into two separate pools via the explicit-mode constructor. */
+	private static String resolveInstanceMode() {
+		String mode = resolveWorkerMode();
+		if (MODE_BOTH.equals(mode)) {
+			LOG.warning("PANAKO_WORKER_MODE='both' used with default constructor — "
+					+ "single instance can't be both pools; falling back to '" + MODE_STAGE1 + "'. "
+					+ "Launcher should use the explicit-mode constructor to spawn both pools.");
+			return MODE_STAGE1;
+		}
+		return mode;
+	}
+
+	/** Default constructor — resolves mode from env var. If global mode is {@link #MODE_BOTH},
+	 *  the launcher must use the explicit-mode constructor below to spawn stage1 and refine
+	 *  workers separately (this constructor collapses "both" to "stage1"). */
 	public PanakoKafkaWorker(Strategy strategy, ReentrantLock writeLock, int maxUploadSizeMB) {
+		this(strategy, writeLock, maxUploadSizeMB, resolveInstanceMode());
+	}
+
+	/** Explicit-mode constructor — used when the launcher needs to force a specific pool
+	 *  (e.g. when global mode is {@link #MODE_BOTH}, launcher spawns one stage1 pool and one
+	 *  refine pool, each with its own forced mode). */
+	public PanakoKafkaWorker(Strategy strategy, ReentrantLock writeLock, int maxUploadSizeMB, String workerMode) {
 		this.strategy = strategy;
 		this.writeLock = writeLock;
 		this.maxBytes = maxUploadSizeMB * 1024L * 1024L;
 
-		String bootstrapServers = Config.get(Key.KAFKA_BOOTSTRAP_SERVERS);
-		String groupId = Config.get(Key.KAFKA_GROUP_ID);
+		if (!MODE_STAGE1.equals(workerMode) && !MODE_REFINE.equals(workerMode)) {
+			throw new IllegalArgumentException("Worker instance mode must be '" + MODE_STAGE1
+					+ "' or '" + MODE_REFINE + "', got: " + workerMode);
+		}
+		this.workerMode = workerMode;
 
-		this.storeRequestTopic = Config.get(Key.KAFKA_STORE_REQUEST_TOPIC);
-		this.storeResultTopic = Config.get(Key.KAFKA_STORE_RESULT_TOPIC);
-		this.monitorRequestTopic = Config.get(Key.KAFKA_REQUEST_TOPIC);
-		this.monitorResultTopic = Config.get(Key.KAFKA_RESPONSE_TOPIC);
+		String bootstrapServers = Config.get(Key.KAFKA_BOOTSTRAP_SERVERS);
+		String groupId;
+
+		if (workerMode.equals(MODE_REFINE)) {
+			// Refine workers use a dedicated topic pair + consumer group so they
+			// don't compete with stage1 workers for messages.
+			this.storeRequestTopic = Config.get(Key.KAFKA_STORE_REQUEST_TOPIC);
+			this.storeResultTopic = Config.get(Key.KAFKA_STORE_RESULT_TOPIC);
+			this.monitorRequestTopic = REFINE_REQUEST_TOPIC;
+			this.monitorResultTopic = REFINE_RESPONSE_TOPIC;
+			groupId = REFINE_GROUP_ID;
+		} else {
+			// Stage1 (default) — byte-identical to prior behavior.
+			this.storeRequestTopic = Config.get(Key.KAFKA_STORE_REQUEST_TOPIC);
+			this.storeResultTopic = Config.get(Key.KAFKA_STORE_RESULT_TOPIC);
+			this.monitorRequestTopic = Config.get(Key.KAFKA_REQUEST_TOPIC);
+			this.monitorResultTopic = Config.get(Key.KAFKA_RESPONSE_TOPIC);
+			groupId = Config.get(Key.KAFKA_GROUP_ID);
+		}
 
 		// Consumer config
 		Properties consumerProps = new Properties();
@@ -98,38 +189,76 @@ public class PanakoKafkaWorker implements Runnable {
 
 	@Override
 	public void run() {
-		String mode = Config.get(Key.KAFKA_MODE).toUpperCase();
+		// Refine workers are monitor-only by design — ignore KAFKA_MODE and skip store topic.
+		String kafkaMode = workerMode.equals(MODE_REFINE) ? "MONITOR" : Config.get(Key.KAFKA_MODE).toUpperCase();
 		List<String> topics = new ArrayList<>();
-		if (mode.equals("ALL") || mode.equals("STORE")) topics.add(storeRequestTopic);
-		if (mode.equals("ALL") || mode.equals("MONITOR")) topics.add(monitorRequestTopic);
+		if (kafkaMode.equals("ALL") || kafkaMode.equals("STORE")) topics.add(storeRequestTopic);
+		if (kafkaMode.equals("ALL") || kafkaMode.equals("MONITOR")) topics.add(monitorRequestTopic);
 		consumer.subscribe(topics);
-		LOG.info("Kafka worker started (mode=" + mode + ") — listening on " + topics);
+		LOG.info("Kafka worker started (worker_mode=" + workerMode + ", kafka_mode=" + kafkaMode
+				+ ") — listening on " + topics);
 
 		try {
 			while (running) {
-				ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(1));
-				for (ConsumerRecord<String, String> record : records) {
-					try {
-						if (record.topic().equals(storeRequestTopic)) {
-							handleStoreRequest(record);
-						} else if (record.topic().equals(monitorRequestTopic)) {
-							handleMonitorRequest(record);
+				try {
+					ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(1));
+					for (ConsumerRecord<String, String> record : records) {
+						try {
+							if (record.topic().equals(storeRequestTopic)) {
+								handleStoreRequest(record);
+							} else if (record.topic().equals(monitorRequestTopic)) {
+								handleMonitorRequest(record);
+							}
+							// Commit only after successful processing
+							safeCommit();
+						} catch (Exception e) {
+							LOG.log(Level.SEVERE, "Kafka message processing failed", e);
+							try {
+								sendError(record.topic().equals(storeRequestTopic) ? storeResultTopic : monitorResultTopic,
+										record.key(), e.getMessage());
+							} catch (Exception sendErr) {
+								LOG.log(Level.WARNING, "Failed to send error response — broker may be down", sendErr);
+							}
+							// Commit even on error to avoid infinite retry of bad messages
+							safeCommit();
 						}
-						// Commit only after successful processing
-						consumer.commitSync();
-					} catch (Exception e) {
-						LOG.log(Level.SEVERE, "Kafka message processing failed", e);
-						sendError(record.topic().equals(storeRequestTopic) ? storeResultTopic : monitorResultTopic,
-								record.key(), e.getMessage());
-						// Commit even on error to avoid infinite retry of bad messages
-						consumer.commitSync();
+					}
+				} catch (org.apache.kafka.common.errors.WakeupException we) {
+					// Triggered by stop() — exit loop only if we're really shutting down
+					if (!running) break;
+				} catch (Exception loopErr) {
+					// Broker down, network drop, group rebalance etc. — DON'T kill the thread.
+					// KafkaConsumer reconnects transparently; just back off and retry the next poll.
+					LOG.log(Level.WARNING, "Kafka poll loop error — will retry after 5s (worker stays alive)", loopErr);
+					try {
+						Thread.sleep(5000);
+					} catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
+						break;
 					}
 				}
 			}
 		} finally {
-			consumer.close();
-			producer.close();
+			try { consumer.close(); } catch (Exception ignored) {}
+			try { producer.close(); } catch (Exception ignored) {}
 			LOG.info("Kafka worker stopped");
+		}
+	}
+
+	/**
+	 * Commit current offsets without letting Kafka group/broker errors kill the worker thread.
+	 * If commit fails (e.g. consumer was kicked out of the group during long processing, or broker
+	 * is temporarily unreachable), we log and continue — the message will simply be reprocessed
+	 * after the consumer rejoins the group, which is acceptable since downstream handlers are
+	 * idempotent (store dedupes via {@code hasResource}, monitor results are keyed by recording_id).
+	 */
+	private void safeCommit() {
+		try {
+			consumer.commitSync();
+		} catch (org.apache.kafka.clients.consumer.CommitFailedException e) {
+			LOG.warning("Commit failed (rebalance or group expel) — message will be reprocessed: " + e.getMessage());
+		} catch (Exception e) {
+			LOG.log(Level.WARNING, "Commit error — continuing (worker stays alive)", e);
 		}
 	}
 

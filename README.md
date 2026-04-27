@@ -126,8 +126,60 @@ Async store and monitor via topics. Enable with `KAFKA_ENABLED=TRUE`.
 |---|---|
 | `panako-store-requests` | Store audio by URL (JSON) |
 | `panako-store-results` | Store results |
-| `panako-monitor-requests` | Monitor audio by URL (JSON) |
-| `panako-monitor-results` | Monitor results with matched tracks |
+| `panako.monitor.request` | Monitor audio by URL (JSON) — Stage 1 |
+| `panako.monitor.response` | Monitor results — Stage 1 |
+| `panako.monitor.refine.request` | Monitor audio by URL (JSON) — Stage 3 refine |
+| `panako.monitor.refine.response` | Monitor results — Stage 3 refine |
+
+#### Worker modes
+
+A single `panako-api` binary runs in one of three worker modes, selected via
+the `PANAKO_WORKER_MODE` env var:
+
+| Mode | Topics consumed / produced | Consumer group |
+|---|---|---|
+| `stage1` *(default)* | `panako.monitor.request` → `panako.monitor.response` (+ store topics if `KAFKA_MODE=ALL\|STORE`) | `panako` (or `KAFKA_GROUP_ID`) |
+| `refine` | `panako.monitor.refine.request` → `panako.monitor.refine.response` | `panako-worker-refine` |
+| `both` | Both pools at once — one stage1 consumer + one refine consumer in the same JVM | `panako` **and** `panako-worker-refine` (one consumer each) |
+
+Request/response JSON schemas are identical across modes — only the topic names
+and consumer group differ. All three modes can coexist in the same cluster;
+refine and stage1 consumers never compete because they use distinct consumer
+groups and subscribe to different topics.
+
+In `both` mode, `KAFKA_WORKER_THREADS` is applied per pool — setting it to `N`
+spawns `N` stage1 workers **and** `N` refine workers in the same JVM.
+
+Run a refine-only worker (example snippet):
+
+```yaml
+services:
+  panako-refine-1:
+    image: innlabkz/ozen-panako:latest
+    environment:
+      STRATEGY: OLAF
+      OLAF_STORAGE: CLICKHOUSE
+      OLAF_CLICKHOUSE_URL: "jdbc:ch://10.0.0.6:8123/default?user=default&password=${CLICKHOUSE_PASSWORD}"
+      KAFKA_ENABLED: "TRUE"
+      KAFKA_MODE: MONITOR
+      KAFKA_BOOTSTRAP_SERVERS: "10.0.0.6:39092"
+      PANAKO_WORKER_MODE: refine          # <-- picks refine topics + group
+```
+
+Run a combined worker that handles both Stage 1 and refine traffic:
+
+```yaml
+services:
+  panako-both-1:
+    image: innlabkz/ozen-panako:latest
+    environment:
+      # ... same Panako / ClickHouse / Kafka config as above ...
+      PANAKO_WORKER_MODE: both            # <-- spawns stage1 + refine pools
+```
+
+Keep existing stage1 workers untouched (no env change needed — default is `stage1`).
+
+See `docker-compose.worker.yml` for a full multi-instance example.
 
 ## Configuration
 

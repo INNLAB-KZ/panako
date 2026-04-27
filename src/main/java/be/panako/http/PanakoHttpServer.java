@@ -214,18 +214,30 @@ public class PanakoHttpServer {
 		try {
 			PanakoHttpServer server = new PanakoHttpServer(port, threadPoolSize, maxUploadSizeMB);
 
-			// Start Kafka workers if enabled
+			// Start Kafka workers if enabled.
+			// PANAKO_WORKER_MODE:
+			//   stage1 (default) — N workers on stage1 topics
+			//   refine           — N workers on refine topics
+			//   both             — N stage1 workers + N refine workers in the same JVM
+			//                      (each pool uses its own consumer group → no contention)
 			if (Config.getBoolean(Key.KAFKA_ENABLED)) {
 				int workerCount = Config.getInt(Key.KAFKA_WORKER_THREADS);
-				for (int i = 0; i < workerCount; i++) {
-					PanakoKafkaWorker kafkaWorker = new PanakoKafkaWorker(
-							Strategy.getInstance(), server.writeLock, maxUploadSizeMB);
-					Thread kafkaThread = new Thread(kafkaWorker, "panako-kafka-worker-" + i);
-					kafkaThread.setDaemon(true);
-					kafkaThread.start();
+				String workerMode = PanakoKafkaWorker.resolveWorkerMode();
+				String[] pools = workerMode.equals(PanakoKafkaWorker.MODE_BOTH)
+						? new String[] { PanakoKafkaWorker.MODE_STAGE1, PanakoKafkaWorker.MODE_REFINE }
+						: new String[] { workerMode };
+				for (String pool : pools) {
+					for (int i = 0; i < workerCount; i++) {
+						PanakoKafkaWorker kafkaWorker = new PanakoKafkaWorker(
+								Strategy.getInstance(), server.writeLock, maxUploadSizeMB, pool);
+						Thread kafkaThread = new Thread(kafkaWorker, "panako-kafka-worker-" + pool + "-" + i);
+						kafkaThread.setDaemon(true);
+						kafkaThread.start();
+					}
 				}
-				System.out.printf("  Kafka: %d workers started (bootstrap: %s)%n",
-						workerCount, Config.get(Key.KAFKA_BOOTSTRAP_SERVERS));
+				System.out.printf("  Kafka: worker_mode=%s, %d worker(s) per pool, pools=%s (bootstrap: %s)%n",
+						workerMode, workerCount, java.util.Arrays.toString(pools),
+						Config.get(Key.KAFKA_BOOTSTRAP_SERVERS));
 			}
 
 			server.start();

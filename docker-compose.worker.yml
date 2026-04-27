@@ -1,0 +1,80 @@
+# Worker-сервер: 3 инстанса panako-api.
+#   panako-api-1           — both (stage1 + refine одновременно внутри одного JVM),
+#                            использует две consumer group: 'panako' и 'panako-worker-refine'.
+#   panako-api-2 / api-3   — refine (подписка на panako.monitor.refine.request),
+#                            consumer group 'panako-worker-refine'.
+#
+# Подключается к ClickHouse и Kafka на master-сервере (10.0.0.6).
+#
+# Запуск:  docker compose -f docker-compose.worker.yml up -d
+#
+# На воркер-сервере в .env обязательно подменить (относительно master .env):
+#   CLICKHOUSE_HOST=10.0.0.6
+#   KAFKA_BOOTSTRAP_SERVERS=10.0.0.6:29092
+#
+# На master-сервере (10.0.0.6) требуется:
+#   - ClickHouse слушает 0.0.0.0:8123 и порт открыт для воркера
+#   - Kafka KAFKA_ADVERTISED_LISTENERS содержит 10.0.0.6:29092 (EXTERNAL listener)
+#   - Топики panako.monitor.refine.request / .response созданы
+#     (или auto.create.topics.enable=true)
+
+x-panako-common: &panako-common
+  image: innlabkz/ozen-panako:latest
+  restart: unless-stopped
+  environment:
+    &panako-env
+    JAVA_OPTS: -Xmx2g
+    STRATEGY: OLAF
+    OLAF_STORAGE: CLICKHOUSE
+    OLAF_CLICKHOUSE_URL: "jdbc:ch://${CLICKHOUSE_HOST:-10.0.0.6}:${CLICKHOUSE_PORT:-8123}/default?user=${CLICKHOUSE_USER:-default}&password=${CLICKHOUSE_PASSWORD:-}"
+    OLAF_CACHE_TO_FILE: "FALSE"
+    OLAF_USE_CACHED_PRINTS: "FALSE"
+    MONITOR_STEP_SIZE: ${MONITOR_STEP_SIZE:-60}
+    MONITOR_OVERLAP: ${MONITOR_OVERLAP:-10}
+    MONITOR_STEP_SIZE_FINE: ${MONITOR_STEP_SIZE_FINE:-15}
+    MONITOR_OVERLAP_FINE: ${MONITOR_OVERLAP_FINE:-5}
+    MONITOR_PARALLEL_WINDOWS: ${MONITOR_PARALLEL_WINDOWS:-4}
+    API_KEY: ${API_KEY:-}
+    KAFKA_ENABLED: "TRUE"
+    KAFKA_MODE: MONITOR
+    KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-10.0.0.6:29092}
+    # ВАЖНО: тот же GROUP_ID, что и у api на master-сервере — иначе партиции не делятся,
+    # а каждый consumer group получает ПОЛНУЮ копию сообщений.
+    KAFKA_GROUP_ID: ${KAFKA_GROUP_ID:-panako}
+
+services:
+  # Универсальный воркер: внутри одного JVM крутится один stage1-consumer и один
+  # refine-consumer в разных consumer group. Не конкурируют между собой и
+  # делят партиции с остальными воркерами соответствующих пулов.
+  panako-api-1:
+    <<: *panako-common
+    container_name: ozen-panako-api-1
+    ports:
+      - "8344:8080"
+    environment:
+      <<: *panako-env
+      SERVER_PORT: 8080
+#      PANAKO_WORKER_MODE: both
+
+  # Refine-only воркеры: отдельный пул под Stage 3 refine-запросы.
+  # Подписка на panako.monitor.refine.request, consumer group panako-worker-refine.
+  # Не конкурируют со stage1-воркерами (другой топик + другая group).
+  panako-api-2:
+    <<: *panako-common
+    container_name: ozen-panako-api-2
+    ports:
+      - "8345:8080"
+    environment:
+      <<: *panako-env
+      SERVER_PORT: 8080
+      PANAKO_WORKER_MODE: refine
+
+  panako-api-3:
+    <<: *panako-common
+    container_name: ozen-panako-api-3
+    ports:
+      - "8346:8080"
+    environment:
+      <<: *panako-env
+      SERVER_PORT: 8080
+      PANAKO_WORKER_MODE: refine
