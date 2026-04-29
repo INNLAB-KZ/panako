@@ -493,6 +493,17 @@ public enum Key{
 	MONITOR_PARALLEL_WINDOWS(4),
 
 	/**
+	 * Maximum gap (seconds) between consecutive detection windows of the same
+	 * track before they are split into separate clusters in the monitor response.
+	 *
+	 * <p>The effective threshold is {@code min(this value, trackDuration * 0.5)}
+	 * when reference track duration is known — a track shorter than 60 seconds
+	 * cannot legitimately have two occurrences separated by more than half its
+	 * length without intermediate detections.</p>
+	 */
+	MONITOR_WINDOW_GAP_THRESHOLD(30.0),
+
+	/**
 	 * ClickHouse JDBC URL for OLAF storage.
 	 * Used when OLAF_STORAGE=CLICKHOUSE.
 	 */

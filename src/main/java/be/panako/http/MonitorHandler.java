@@ -394,17 +394,6 @@ public class MonitorHandler implements HttpHandler {
 	}
 
 	/**
-	 * Merges window results by identifier, then refines start/end boundaries.
-	 *
-	 * <p>Refinement logic:
-	 * <ul>
-	 *   <li>If match_start >= 5s: the track began before our first detection window.
-	 *       Extract 30s from (query_start - match_start) and re-query to find precise start.</li>
-	 *   <li>If (ref_duration - match_end) >= 5s: the track continued after our last detection window.
-	 *       Extract 30s from (query_end) and re-query to find precise end.</li>
-	 * </ul>
-	 */
-	/**
 	 * Extracts waveform data (peak amplitudes) from an audio file using ffmpeg.
 	 * Returns one float per second, normalized to 0.0-1.0.
 	 */
@@ -459,57 +448,66 @@ public class MonitorHandler implements HttpHandler {
 			byId.computeIfAbsent(r.refIdentifier, k -> new ArrayList<>()).add(r);
 		}
 
-		// Merge each group
+		double maxGap = Config.getFloat(Key.MONITOR_WINDOW_GAP_THRESHOLD);
+
+		// Merge each group, splitting into clusters by gap threshold
 		List<MergedMatch> merged = new ArrayList<>();
 		for (Map.Entry<String, List<QueryResult>> entry : byId.entrySet()) {
 			List<QueryResult> group = entry.getValue();
 			group.sort(Comparator.comparingDouble(r -> r.queryStart));
 
 			QueryResult first = group.get(0);
-			double queryStart = first.queryStart;
-			double queryEnd = first.queryStop;
-			double refStart = first.refStart;
-			double refEnd = first.refStop;
-			int totalScore = 0;
-			double sumTimeFactor = 0;
-			double sumFreqFactor = 0;
-			double sumMatchPct = 0;
-
-			for (QueryResult r : group) {
-				if (r.queryStart < queryStart) queryStart = r.queryStart;
-				if (r.queryStop > queryEnd) queryEnd = r.queryStop;
-				if (r.refStart < refStart) refStart = r.refStart;
-				if (r.refStop > refEnd) refEnd = r.refStop;
-				totalScore += (int) r.score;
-				sumTimeFactor += r.timeFactor;
-				sumFreqFactor += r.frequencyFactor;
-				sumMatchPct += r.percentOfSecondsWithMatches;
-			}
-
 			MergedMatch m = new MergedMatch();
 			m.identifier = first.refIdentifier;
 			m.isrc = HttpUtil.extractIsrc(first.refPath);
 			m.filename = first.refPath;
-			m.queryStart = queryStart;
-			m.queryEnd = queryEnd;
-			m.refStart = refStart;
-			m.refEnd = refEnd;
-			m.score = totalScore;
-			m.timeFactor = sumTimeFactor / group.size();
-			m.frequencyFactor = sumFreqFactor / group.size();
-			m.matchPercentage = sumMatchPct / group.size();
-			m.windowHits = group.size();
+
+			// Resolve effective gap threshold: cap by half of the track duration
+			// when known, so very short tracks cannot legitimately span huge gaps.
+			double trackDuration = -1;
+			if (strategy != null) {
+				try {
+					String metadata = strategy.metadata(m.filename);
+					double[] parsed = HttpUtil.parseMetadata(metadata);
+					if (parsed != null) trackDuration = parsed[0];
+				} catch (Exception e) {
+					LOG.log(Level.FINE, "Could not get metadata for " + m.filename, e);
+				}
+			}
+			double gapThreshold = effectiveGapThreshold(maxGap, trackDuration);
+
+			List<List<QueryResult>> clusters = clusterWindows(group, gapThreshold);
+			for (List<QueryResult> cluster : clusters) {
+				m.windows.add(buildWindow(cluster));
+			}
+			recomputeEnvelope(m, group);
 			merged.add(m);
 		}
 
-		// Refinement pass — refine start and end for each track
+		// Refinement pass — refine each cluster individually so refinement
+		// cannot stitch two separate occurrences across the gap that put them
+		// in different clusters.
 		if (recordingPath != null && strategy != null) {
 			for (MergedMatch m : merged) {
+				double trackDuration = -1;
 				try {
-					refineMatchBoundaries(strategy, recordingPath, m);
+					String metadata = strategy.metadata(m.filename);
+					double[] parsed = HttpUtil.parseMetadata(metadata);
+					if (parsed != null) trackDuration = parsed[0];
 				} catch (Exception e) {
-					LOG.log(Level.WARNING, "Refinement failed for " + m.isrc + ": " + e.getMessage());
+					LOG.log(Level.FINE, "Could not get metadata for " + m.filename, e);
 				}
+				double gapThreshold = effectiveGapThreshold(maxGap, trackDuration);
+				for (MatchWindow w : m.windows) {
+					try {
+						refineWindowBoundaries(strategy, recordingPath, m.identifier,
+								m.filename, w, trackDuration, gapThreshold);
+					} catch (Exception e) {
+						LOG.log(Level.WARNING, "Refinement failed for " + m.isrc + ": " + e.getMessage());
+					}
+				}
+				// Envelope must reflect refined window boundaries.
+				recomputeEnvelopeFromWindows(m);
 			}
 		}
 
@@ -545,7 +543,25 @@ public class MonitorHandler implements HttpHandler {
 			json.append("\"time_factor\":").append(String.format("%.3f", m.timeFactor)).append(",");
 			json.append("\"frequency_factor\":").append(String.format("%.3f", m.frequencyFactor)).append(",");
 			json.append("\"match_percentage\":").append(String.format("%.1f", m.matchPercentage)).append(",");
-			json.append("\"window_hits\":").append(m.windowHits);
+			json.append("\"window_hits\":").append(m.windowHits).append(",");
+			// Per-occurrence breakdown. One entry per contiguous play of the
+			// track — if the same track plays twice on a recording with a gap,
+			// there will be two windows here while the envelope fields above
+			// stay min/max across both occurrences.
+			json.append("\"windows\":[");
+			for (int wi = 0; wi < m.windows.size(); wi++) {
+				MatchWindow w = m.windows.get(wi);
+				if (wi > 0) json.append(",");
+				json.append("{");
+				json.append("\"query_start_seconds\":").append(String.format("%.1f", w.queryStart)).append(",");
+				json.append("\"query_end_seconds\":").append(String.format("%.1f", w.queryEnd)).append(",");
+				json.append("\"match_start_seconds\":").append(String.format("%.1f", w.refStart)).append(",");
+				json.append("\"match_end_seconds\":").append(String.format("%.1f", w.refEnd)).append(",");
+				json.append("\"score\":").append(w.score).append(",");
+				json.append("\"window_hits\":").append(w.windowHits);
+				json.append("}");
+			}
+			json.append("]");
 			json.append("}");
 		}
 
@@ -582,39 +598,136 @@ public class MonitorHandler implements HttpHandler {
 	}
 
 	/**
-	 * Refines the start and end boundaries of a merged match by re-querying
-	 * small chunks around the estimated boundaries.
+	 * Splits a list of detection windows for a single track (sorted by
+	 * {@code queryStart}) into clusters whenever the gap between two
+	 * consecutive windows exceeds {@code gapThreshold} seconds.
 	 *
-	 * <p>For start: if match_start >= refineThreshold, we missed the beginning.
-	 * We estimate the real start at (query_start - match_start), extract a 30s chunk
-	 * there and query to find the precise start.</p>
-	 *
-	 * <p>For end: we get the reference track duration from metadata. If
-	 * (ref_duration - match_end) >= refineThreshold, the track continued playing.
-	 * We extract a 30s chunk after query_end and query to find the precise end.</p>
+	 * <p>This is what prevents a track that plays twice on a recording with a
+	 * pause between occurrences from being collapsed into one fictitious match
+	 * whose duration exceeds the track itself.</p>
 	 */
-	private static void refineMatchBoundaries(Strategy strategy, String recordingPath, MergedMatch m)
-			throws IOException {
+	public static List<List<QueryResult>> clusterWindows(List<QueryResult> windows, double gapThreshold) {
+		List<List<QueryResult>> clusters = new ArrayList<>();
+		if (windows == null || windows.isEmpty()) return clusters;
+		List<QueryResult> current = new ArrayList<>();
+		current.add(windows.get(0));
+		for (int i = 1; i < windows.size(); i++) {
+			QueryResult w = windows.get(i);
+			QueryResult prev = current.get(current.size() - 1);
+			if (w.queryStart - prev.queryStop > gapThreshold) {
+				clusters.add(current);
+				current = new ArrayList<>();
+			}
+			current.add(w);
+		}
+		clusters.add(current);
+		return clusters;
+	}
+
+	/**
+	 * Effective per-track gap threshold. Capped by half of the reference
+	 * duration when known so that very short tracks cannot legitimately span
+	 * a 30-second gap without intermediate detection windows.
+	 */
+	public static double effectiveGapThreshold(double maxGap, double trackDuration) {
+		if (trackDuration > 0) {
+			return Math.min(maxGap, trackDuration * 0.5);
+		}
+		return maxGap;
+	}
+
+	/** Aggregate one cluster of detection windows into a {@link MatchWindow}. */
+	private static MatchWindow buildWindow(List<QueryResult> cluster) {
+		QueryResult first = cluster.get(0);
+		MatchWindow w = new MatchWindow();
+		w.queryStart = first.queryStart;
+		w.queryEnd = first.queryStop;
+		w.refStart = first.refStart;
+		w.refEnd = first.refStop;
+		int totalScore = 0;
+		for (QueryResult r : cluster) {
+			if (r.queryStart < w.queryStart) w.queryStart = r.queryStart;
+			if (r.queryStop > w.queryEnd) w.queryEnd = r.queryStop;
+			if (r.refStart < w.refStart) w.refStart = r.refStart;
+			if (r.refStop > w.refEnd) w.refEnd = r.refStop;
+			totalScore += (int) r.score;
+		}
+		w.score = totalScore;
+		w.windowHits = cluster.size();
+		return w;
+	}
+
+	/**
+	 * Recompute the envelope (legacy min/max fields) and aggregate stats from
+	 * the original detection windows that produced the clusters. Done before
+	 * refinement so that {@code time_factor} / {@code frequency_factor} /
+	 * {@code match_percentage} keep their averages-over-detections semantics.
+	 */
+	private static void recomputeEnvelope(MergedMatch m, List<QueryResult> group) {
+		double sumTimeFactor = 0;
+		double sumFreqFactor = 0;
+		double sumMatchPct = 0;
+		int totalScore = 0;
+		for (QueryResult r : group) {
+			sumTimeFactor += r.timeFactor;
+			sumFreqFactor += r.frequencyFactor;
+			sumMatchPct += r.percentOfSecondsWithMatches;
+			totalScore += (int) r.score;
+		}
+		m.score = totalScore;
+		m.timeFactor = sumTimeFactor / group.size();
+		m.frequencyFactor = sumFreqFactor / group.size();
+		m.matchPercentage = sumMatchPct / group.size();
+		m.windowHits = group.size();
+		recomputeEnvelopeFromWindows(m);
+	}
+
+	/** Recompute the legacy envelope (min/max query/ref times) from windows. */
+	private static void recomputeEnvelopeFromWindows(MergedMatch m) {
+		if (m.windows.isEmpty()) return;
+		MatchWindow first = m.windows.get(0);
+		m.queryStart = first.queryStart;
+		m.queryEnd = first.queryEnd;
+		m.refStart = first.refStart;
+		m.refEnd = first.refEnd;
+		for (MatchWindow w : m.windows) {
+			if (w.queryStart < m.queryStart) m.queryStart = w.queryStart;
+			if (w.queryEnd > m.queryEnd) m.queryEnd = w.queryEnd;
+			if (w.refStart < m.refStart) m.refStart = w.refStart;
+			if (w.refEnd > m.refEnd) m.refEnd = w.refEnd;
+		}
+	}
+
+	/**
+	 * Refines the start and end of a single occurrence (cluster) by re-querying
+	 * small chunks around its estimated boundaries.
+	 *
+	 * <p>The probe range is bounded by {@code gapThreshold} so refinement
+	 * cannot reach across the gap that separates this cluster from a sibling
+	 * cluster of the same track and stitch them into one fictitious match.</p>
+	 */
+	private static void refineWindowBoundaries(Strategy strategy, String recordingPath,
+											   String targetId, String filename,
+											   MatchWindow w, double trackDuration,
+											   double gapThreshold) throws IOException {
 
 		double refineThreshold = Config.getFloat(Key.MONITOR_REFINE_THRESHOLD);
 		int refineChunkSize = Config.getInt(Key.MONITOR_REFINE_CHUNK_SIZE);
 		int maxResults = Config.getInt(Key.NUMBER_OF_QUERY_RESULTS);
-		String targetId = m.identifier;
 
 		// --- Refine START ---
-		// Try multiple chunks working backward from the first detection to find the true start.
-		// Chunk 1: just before query_start (captures audio right before first detection)
-		// Chunk 2: further back, near the estimated start (if the track plays from beginning)
-		if (m.refStart >= refineThreshold) {
-			double estimatedStart = m.queryStart - m.refStart;
-			double bestQueryStart = m.queryStart;
-			double bestRefStart = m.refStart;
+		if (w.refStart >= refineThreshold) {
+			double estimatedStart = w.queryStart - w.refStart;
+			// Cap probe distance so we cannot land inside the previous cluster.
+			double earliest = Math.max(0, w.queryStart - gapThreshold);
+			estimatedStart = Math.max(estimatedStart, earliest);
+			double bestQueryStart = w.queryStart;
+			double bestRefStart = w.refStart;
 
-			// Chunk positions to try: close to detection first, then further back
 			double[] offsets = {
-				Math.max(0, m.queryStart - refineChunkSize),  // right before first detection
-				Math.max(0, (m.queryStart + estimatedStart) / 2 - 5),  // midpoint
-				Math.max(0, estimatedStart - 5)  // near estimated start
+				Math.max(0, w.queryStart - refineChunkSize),
+				Math.max(0, (w.queryStart + estimatedStart) / 2 - 5),
+				Math.max(0, estimatedStart - 5)
 			};
 
 			for (double chunkOffset : offsets) {
@@ -626,7 +739,7 @@ public class MonitorHandler implements HttpHandler {
 					for (QueryResult r : handler.results) {
 						if (r.refIdentifier.equals(targetId)) {
 							double absoluteQueryStart = r.queryStart + chunkOffset;
-							if (absoluteQueryStart < bestQueryStart) {
+							if (absoluteQueryStart < bestQueryStart && absoluteQueryStart >= earliest) {
 								bestQueryStart = absoluteQueryStart;
 								bestRefStart = r.refStart;
 							}
@@ -638,70 +751,59 @@ public class MonitorHandler implements HttpHandler {
 				}
 			}
 
-			if (bestQueryStart < m.queryStart) {
-				m.queryStart = bestQueryStart;
-				m.refStart = bestRefStart;
+			if (bestQueryStart < w.queryStart) {
+				w.queryStart = bestQueryStart;
+				w.refStart = bestRefStart;
 				LOG.info(String.format("Refined START for %s: query_start=%.1f, match_start=%.1f",
-						m.isrc, m.queryStart, m.refStart));
+						targetId, w.queryStart, w.refStart));
 			}
 		}
 
 		// --- Refine END ---
-		// Always try to refine end — look further in the recording for more of the track.
-		// If we have metadata, use ref duration to estimate. Otherwise, just probe ahead.
-		double refDuration = -1;
-		try {
-			String metadata = strategy.metadata(m.filename);
-			double[] parsed = HttpUtil.parseMetadata(metadata);
-			if (parsed != null) {
-				refDuration = parsed[0];
-			}
-		} catch (Exception e) {
-			LOG.log(Level.FINE, "Could not get metadata for " + m.filename, e);
-		}
-
-		// Calculate gap: if we know ref duration, use it. Otherwise assume there's more to find.
-		double gapAtEnd = (refDuration > 0) ? (refDuration - m.refEnd) : refineChunkSize;
+		double gapAtEnd = (trackDuration > 0) ? (trackDuration - w.refEnd) : refineChunkSize;
+		// Bounded probe: cannot extend further than gapThreshold past current
+		// queryEnd, so it cannot cross into the next cluster of the same track.
+		gapAtEnd = Math.min(gapAtEnd, gapThreshold);
 		if (gapAtEnd >= refineThreshold) {
-			double estimatedEnd = m.queryEnd + gapAtEnd;
-			double bestQueryEnd = m.queryEnd;
-			double bestRefEnd = m.refEnd;
+			double estimatedEnd = w.queryEnd + gapAtEnd;
+			double latest = w.queryEnd + gapThreshold;
+			double bestQueryEnd = w.queryEnd;
+			double bestRefEnd = w.refEnd;
 
-				// Chunk positions: right after last detection, midpoint, near estimated end
-				double[] offsets = {
-					Math.max(0, m.queryEnd - 5),  // right after last detection
-					Math.max(0, (m.queryEnd + estimatedEnd) / 2 - refineChunkSize / 2.0),  // midpoint
-					Math.max(0, estimatedEnd - refineChunkSize + 5)  // near estimated end
-				};
+			double[] offsets = {
+				Math.max(0, w.queryEnd - 5),
+				Math.max(0, (w.queryEnd + estimatedEnd) / 2 - refineChunkSize / 2.0),
+				Math.max(0, estimatedEnd - refineChunkSize + 5)
+			};
 
-				for (double chunkOffset : offsets) {
-					Path chunk = extractAudioChunkDouble(recordingPath, chunkOffset, refineChunkSize);
-					try {
-						CollectingResultHandler handler = new CollectingResultHandler();
-						strategy.query(chunk.toAbsolutePath().toString(), maxResults, new HashSet<>(), handler);
+			for (double chunkOffset : offsets) {
+				Path chunk = extractAudioChunkDouble(recordingPath, chunkOffset, refineChunkSize);
+				try {
+					CollectingResultHandler handler = new CollectingResultHandler();
+					strategy.query(chunk.toAbsolutePath().toString(), maxResults, new HashSet<>(), handler);
 
-						for (QueryResult r : handler.results) {
-							if (r.refIdentifier.equals(targetId)) {
-								double absoluteQueryEnd = r.queryStop + chunkOffset;
-								if (absoluteQueryEnd > bestQueryEnd) {
-									bestQueryEnd = absoluteQueryEnd;
-									bestRefEnd = r.refStop;
-								}
-								break;
+					for (QueryResult r : handler.results) {
+						if (r.refIdentifier.equals(targetId)) {
+							double absoluteQueryEnd = r.queryStop + chunkOffset;
+							if (absoluteQueryEnd > bestQueryEnd && absoluteQueryEnd <= latest) {
+								bestQueryEnd = absoluteQueryEnd;
+								bestRefEnd = r.refStop;
 							}
+							break;
 						}
-					} finally {
-						try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
 					}
-				}
-
-				if (bestQueryEnd > m.queryEnd) {
-					m.queryEnd = bestQueryEnd;
-					m.refEnd = bestRefEnd;
-					LOG.info(String.format("Refined END for %s: query_end=%.1f, match_end=%.1f",
-							m.isrc, m.queryEnd, m.refEnd));
+				} finally {
+					try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
 				}
 			}
+
+			if (bestQueryEnd > w.queryEnd) {
+				w.queryEnd = bestQueryEnd;
+				w.refEnd = bestRefEnd;
+				LOG.info(String.format("Refined END for %s: query_end=%.1f, match_end=%.1f",
+						targetId, w.queryEnd, w.refEnd));
+			}
+		}
 	}
 
 	static class MergedMatch {
@@ -716,6 +818,26 @@ public class MonitorHandler implements HttpHandler {
 		double timeFactor;
 		double frequencyFactor;
 		double matchPercentage;
+		int windowHits;
+		/**
+		 * Per-occurrence breakdown: each entry corresponds to a contiguous group
+		 * of detection windows for this track. The envelope fields above are the
+		 * min/max across all windows (kept for backwards compatibility).
+		 */
+		List<MatchWindow> windows = new ArrayList<>();
+	}
+
+	/**
+	 * One contiguous occurrence of a track inside the monitored recording.
+	 * Multiple {@code MatchWindow}s can belong to the same {@link MergedMatch}
+	 * when the same track plays more than once with a gap between occurrences.
+	 */
+	static class MatchWindow {
+		double queryStart;
+		double queryEnd;
+		double refStart;
+		double refEnd;
+		int score;
 		int windowHits;
 	}
 
