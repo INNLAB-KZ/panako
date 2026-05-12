@@ -259,10 +259,18 @@ public class MonitorHandler implements HttpHandler {
 	private static List<QueryResult> monitorSequential(Strategy strategy, String filePath,
 			int stepSize, int actualStep, int maxResults, double totalDuration) throws IOException {
 		List<QueryResult> allResults = new ArrayList<>();
+		// Defense-in-depth: even if totalDuration is wrong, stop as soon as ffmpeg
+		// returns a near-empty chunk (i.e. we walked past real EOF).
+		long minChunkBytes = minChunkBytesForStep(1);
 
 		for (int t = 0; t + stepSize < totalDuration; t += actualStep) {
 			Path chunk = extractAudioChunk(filePath, t, stepSize);
 			try {
+				long sz = Files.size(chunk);
+				if (sz < minChunkBytes) {
+					LOG.info("EOF detected at t=" + t + "s (chunk=" + sz + "B) — stopping monitor loop");
+					break;
+				}
 				CollectingResultHandler handler = new CollectingResultHandler();
 				strategy.query(chunk.toAbsolutePath().toString(), maxResults, new HashSet<>(), handler);
 
@@ -281,6 +289,17 @@ public class MonitorHandler implements HttpHandler {
 		return allResults;
 	}
 
+	/**
+	 * Minimum byte size for a chunk that contains at least {@code seconds} of real
+	 * audio. Chunks smaller than this are treated as past-EOF artefacts from ffmpeg
+	 * (typically a 44-byte WAV header with no samples).
+	 */
+	private static long minChunkBytesForStep(int seconds) {
+		int sampleRate = Config.getInt(Key.OLAF_SAMPLE_RATE);
+		// 44-byte WAV header + mono 16-bit PCM samples.
+		return 44L + (long) sampleRate * 2L * seconds;
+	}
+
 	private static List<QueryResult> monitorParallel(Strategy strategy, String filePath,
 			int stepSize, int actualStep, int maxResults, double totalDuration, int parallelism) throws IOException {
 		List<Integer> offsets = new ArrayList<>();
@@ -291,25 +310,42 @@ public class MonitorHandler implements HttpHandler {
 		List<QueryResult> allResults = Collections.synchronizedList(new ArrayList<>());
 		ExecutorService executor = Executors.newFixedThreadPool(parallelism);
 
+		// Defense-in-depth: if a chunk comes back near-empty we treat that as past-EOF
+		// and signal all in-flight / pending tasks to bail out. Without this, a wildly
+		// inflated container duration would still cost us thousands of useless ffmpeg
+		// extractions before the loop terminates naturally.
+		final long minChunkBytes = minChunkBytesForStep(1);
+		final java.util.concurrent.atomic.AtomicBoolean eofReached =
+				new java.util.concurrent.atomic.AtomicBoolean(false);
+
 		List<Future<?>> futures = new ArrayList<>();
 		for (int t : offsets) {
+			final int offset = t;
 			futures.add(executor.submit(() -> {
+				if (eofReached.get()) return;
 				Path chunk = null;
 				try {
-					chunk = extractAudioChunk(filePath, t, stepSize);
+					chunk = extractAudioChunk(filePath, offset, stepSize);
+					long sz = Files.size(chunk);
+					if (sz < minChunkBytes) {
+						if (eofReached.compareAndSet(false, true)) {
+							LOG.info("EOF detected at t=" + offset + "s (chunk=" + sz + "B) — short-circuiting remaining windows");
+						}
+						return;
+					}
 					Strategy localStrategy = new OlafStrategy();
 					CollectingResultHandler handler = new CollectingResultHandler();
 					localStrategy.query(chunk.toAbsolutePath().toString(), maxResults, new HashSet<>(), handler);
 
 					for (QueryResult r : handler.results) {
 						allResults.add(new QueryResult(
-								r.queryPath, r.queryStart + t, r.queryStop + t,
+								r.queryPath, r.queryStart + offset, r.queryStop + offset,
 								r.refPath, r.refIdentifier, r.refStart, r.refStop,
 								r.score, r.timeFactor, r.frequencyFactor,
 								r.percentOfSecondsWithMatches));
 					}
 				} catch (IOException e) {
-					LOG.log(Level.WARNING, "Failed to process window at offset " + t, e);
+					LOG.log(Level.WARNING, "Failed to process window at offset " + offset, e);
 				} finally {
 					if (chunk != null) {
 						try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
@@ -334,27 +370,79 @@ public class MonitorHandler implements HttpHandler {
 	}
 
 	/**
-	 * Get audio duration in seconds using ffprobe.
+	 * Get audio duration in seconds.
+	 *
+	 * <p>For m4a/aac/mp4 containers (and whenever ffprobe reports an implausible value)
+	 * we fall back to a full ffmpeg decode-to-null and parse the final {@code time=}
+	 * line from stderr. AAC/M4A files in the wild routinely carry broken container
+	 * headers (e.g. {@code duration=30:00:00} for a 01:01:39 stream); using that bad
+	 * value drove the monitor loop to extract ~30x extra empty windows.</p>
 	 */
 	static double getAudioDuration(String filePath) throws IOException {
+		double fast = ffprobeFormatDuration(filePath);
+		String lower = filePath.toLowerCase();
+		boolean risky = lower.endsWith(".m4a") || lower.endsWith(".aac")
+				|| lower.endsWith(".mp4") || lower.endsWith(".m4b");
+		if (risky || Double.isNaN(fast) || fast <= 0 || fast > 24 * 3600) {
+			double real = ffmpegDecodeDuration(filePath);
+			if (real > 0) {
+				if (!Double.isNaN(fast) && fast > 0 && Math.abs(real - fast) > 5) {
+					LOG.warning("Container duration lied: header=" + fast
+							+ "s, real=" + real + "s for " + filePath);
+				}
+				return real;
+			}
+		}
+		if (Double.isNaN(fast) || fast <= 0) {
+			throw new IOException("Could not determine audio duration for " + filePath);
+		}
+		return fast;
+	}
+
+	/** Reads container-level duration. Returns NaN on any failure. */
+	private static double ffprobeFormatDuration(String filePath) {
+		try {
+			ProcessBuilder pb = new ProcessBuilder(
+					"ffprobe", "-v", "error",
+					"-show_entries", "format=duration",
+					"-of", "default=noprint_wrappers=1:nokey=1",
+					filePath);
+			pb.redirectErrorStream(true);
+			Process p = pb.start();
+			String output = new String(p.getInputStream().readAllBytes()).trim();
+			p.waitFor();
+			return Double.parseDouble(output);
+		} catch (Exception e) {
+			return Double.NaN;
+		}
+	}
+
+	/**
+	 * Decodes the audio stream to null and returns the actual elapsed time reported
+	 * by ffmpeg. Slow but truthful — needed when container header lies about duration.
+	 * Returns -1 if no usable {@code time=} line was emitted.
+	 */
+	private static double ffmpegDecodeDuration(String filePath) throws IOException {
 		ProcessBuilder pb = new ProcessBuilder(
-				"ffprobe", "-v", "error",
-				"-show_entries", "format=duration",
-				"-of", "default=noprint_wrappers=1:nokey=1",
-				filePath);
+				"ffmpeg", "-nostdin", "-i", filePath,
+				"-vn", "-map", "0:a:0", "-f", "null", "-");
 		pb.redirectErrorStream(true);
 		Process p = pb.start();
-		String output = new String(p.getInputStream().readAllBytes()).trim();
+		String log = new String(p.getInputStream().readAllBytes());
 		try {
 			p.waitFor();
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 		}
-		try {
-			return Double.parseDouble(output);
-		} catch (NumberFormatException e) {
-			throw new IOException("Could not determine audio duration: " + output);
+		java.util.regex.Matcher m = java.util.regex.Pattern
+				.compile("time=(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)").matcher(log);
+		double last = -1;
+		while (m.find()) {
+			last = Integer.parseInt(m.group(1)) * 3600.0
+					+ Integer.parseInt(m.group(2)) * 60.0
+					+ Double.parseDouble(m.group(3));
 		}
+		return last;
 	}
 
 	/**

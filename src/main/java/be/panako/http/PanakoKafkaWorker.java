@@ -170,7 +170,7 @@ public class PanakoKafkaWorker implements Runnable {
 		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 		consumerProps.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "1");
-		consumerProps.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "600000"); // 10 minutes
+		consumerProps.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "1800000"); // 30 minutes
 		consumerProps.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "30000");
 		this.consumer = new KafkaConsumer<>(consumerProps);
 
@@ -371,6 +371,8 @@ public class PanakoKafkaWorker implements Runnable {
 			filename = "audio.mp3";
 		}
 
+		List<int[]> segments = extractSegments(body);
+
 		Path audioFile = null;
 		try {
 			Path tempFile = Files.createTempFile("panako_kafka_monitor_", "_" + filename);
@@ -387,7 +389,37 @@ public class PanakoKafkaWorker implements Runnable {
 			String filePath = audioFile.toAbsolutePath().toString();
 
 			double totalDuration = MonitorHandler.getAudioDuration(filePath);
-			List<QueryResult> allResults = MonitorHandler.monitorWithAbsoluteTimes(strategy, filePath);
+			List<QueryResult> allResults;
+
+			if (segments != null && !segments.isEmpty()) {
+				// Segments mode: only process specified time ranges
+				allResults = new ArrayList<>();
+				for (int[] seg : segments) {
+					int segStart = seg[0];
+					int segDuration = seg[1] - seg[0];
+					if (segDuration <= 0) continue;
+
+					Path chunk = MonitorHandler.extractAudioChunkDouble(filePath, segStart, segDuration);
+					try {
+						List<QueryResult> segResults = MonitorHandler.monitorWithAbsoluteTimes(strategy, chunk.toAbsolutePath().toString());
+						// Offset results back to original file timeline
+						for (QueryResult r : segResults) {
+							allResults.add(new QueryResult(
+									r.queryPath, r.queryStart + segStart, r.queryStop + segStart,
+									r.refPath, r.refIdentifier, r.refStart, r.refStop,
+									r.score, r.timeFactor, r.frequencyFactor,
+									r.percentOfSecondsWithMatches));
+						}
+					} finally {
+						try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
+					}
+				}
+				LOG.info("Kafka monitor (segments mode): " + segments.size() + " segments for " + recordingId);
+			} else {
+				// Full file mode (backward compatible)
+				allResults = MonitorHandler.monitorWithAbsoluteTimes(strategy, filePath);
+			}
+
 			long processingTimeMs = System.currentTimeMillis() - startTime;
 
 			// Build response with recording_id and duration_seconds prepended
@@ -408,6 +440,53 @@ public class PanakoKafkaWorker implements Runnable {
 				try { Files.deleteIfExists(audioFile); } catch (IOException ignored) {}
 			}
 		}
+	}
+
+	/**
+	 * Parse "segments" array from JSON: [{"start_seconds":120,"end_seconds":300}, ...]
+	 * Returns null if no segments field or empty array.
+	 */
+	private static List<int[]> extractSegments(String json) {
+		if (json == null) return null;
+		int idx = json.indexOf("\"segments\"");
+		if (idx == -1) return null;
+		int arrStart = json.indexOf('[', idx);
+		if (arrStart == -1) return null;
+		int arrEnd = json.indexOf(']', arrStart);
+		if (arrEnd == -1) return null;
+
+		String arrStr = json.substring(arrStart + 1, arrEnd);
+		if (arrStr.trim().isEmpty()) return null;
+
+		List<int[]> segments = new ArrayList<>();
+		// Split by "},{" to get each segment object
+		String[] parts = arrStr.split("\\},\\s*\\{");
+		for (String part : parts) {
+			part = part.replace("{", "").replace("}", "").trim();
+			int startSec = extractInt(part, "start_seconds");
+			int endSec = extractInt(part, "end_seconds");
+			if (startSec >= 0 && endSec > startSec) {
+				segments.add(new int[]{startSec, endSec});
+			}
+		}
+		return segments.isEmpty() ? null : segments;
+	}
+
+	private static int extractInt(String fragment, String key) {
+		int idx = fragment.indexOf("\"" + key + "\"");
+		if (idx == -1) return -1;
+		int colon = fragment.indexOf(':', idx);
+		if (colon == -1) return -1;
+		StringBuilder num = new StringBuilder();
+		for (int i = colon + 1; i < fragment.length(); i++) {
+			char c = fragment.charAt(i);
+			if (c == ' ' || c == '\t') continue;
+			if (c >= '0' && c <= '9') num.append(c);
+			else if (num.length() > 0) break;
+		}
+		if (num.length() == 0) return -1;
+		try { return Integer.parseInt(num.toString()); }
+		catch (NumberFormatException e) { return -1; }
 	}
 
 	private void send(String topic, String key, String value) {
