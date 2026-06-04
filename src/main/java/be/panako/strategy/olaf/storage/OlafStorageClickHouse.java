@@ -24,9 +24,18 @@ import java.util.logging.Logger;
  *     resource_id Int64,
  *     path        String,
  *     duration    Float32,
- *     num_fingerprints Int32
+ *     num_fingerprints Int32,
+ *     title       Nullable(String),
+ *     audio_url   Nullable(String)
  * ) ENGINE = ReplacingMergeTree()
  * ORDER BY resource_id;
+ * </pre>
+ *
+ * <p>Pre-existing production tables created before {@code title} and
+ * {@code audio_url} were introduced must be migrated once by running:</p>
+ * <pre>
+ * ALTER TABLE olaf_metadata ADD COLUMN IF NOT EXISTS title Nullable(String);
+ * ALTER TABLE olaf_metadata ADD COLUMN IF NOT EXISTS audio_url Nullable(String);
  * </pre>
  */
 public class OlafStorageClickHouse implements OlafStorage {
@@ -70,7 +79,9 @@ public class OlafStorageClickHouse implements OlafStorage {
 					"resource_id Int64, " +
 					"path String, " +
 					"duration Float32, " +
-					"num_fingerprints Int32" +
+					"num_fingerprints Int32, " +
+					"title Nullable(String), " +
+					"audio_url Nullable(String)" +
 					") ENGINE = ReplacingMergeTree() " +
 					"ORDER BY resource_id");
 
@@ -85,13 +96,30 @@ public class OlafStorageClickHouse implements OlafStorage {
 
 	@Override
 	public void storeMetadata(long resourceID, String resourcePath, float duration, int numberOfFingerprints) {
+		storeMetadataExt(resourceID, resourcePath, duration, numberOfFingerprints, null, null);
+	}
+
+	/**
+	 * Store metadata including the optional descriptive {@code title} and
+	 * {@code audio_url} fields. Either of those fields may be {@code null}.
+	 *
+	 * <p>Uses the same {@code INSERT} statement as {@link #storeMetadata}; the
+	 * underlying {@code ReplacingMergeTree} engine deduplicates rows by
+	 * {@code resource_id} on background merge, so calling this method after a
+	 * previous {@code storeMetadata} (e.g. one issued by upstream strategy
+	 * code) safely overwrites the existing entry.</p>
+	 */
+	public void storeMetadataExt(long resourceID, String resourcePath, float duration, int numberOfFingerprints,
+								 String title, String audioUrl) {
 		try (Connection conn = getConnection();
 			 PreparedStatement ps = conn.prepareStatement(
-					 "INSERT INTO olaf_metadata (resource_id, path, duration, num_fingerprints) VALUES (?, ?, ?, ?)")) {
+					 "INSERT INTO olaf_metadata (resource_id, path, duration, num_fingerprints, title, audio_url) VALUES (?, ?, ?, ?, ?, ?)")) {
 			ps.setLong(1, resourceID);
 			ps.setString(2, resourcePath);
 			ps.setFloat(3, duration);
 			ps.setInt(4, numberOfFingerprints);
+			if (title == null) ps.setNull(5, Types.VARCHAR); else ps.setString(5, title);
+			if (audioUrl == null) ps.setNull(6, Types.VARCHAR); else ps.setString(6, audioUrl);
 			ps.executeUpdate();
 		} catch (SQLException e) {
 			LOG.log(Level.SEVERE, "Failed to store metadata", e);
@@ -234,9 +262,18 @@ public class OlafStorageClickHouse implements OlafStorage {
 
 	@Override
 	public OlafResourceMetadata getMetadata(long identifier) {
+		OlafResourceMetadataExt ext = getMetadataExt(identifier);
+		return ext == null ? null : ext.base;
+	}
+
+	/**
+	 * Read the full metadata row, including the optional {@code title} and
+	 * {@code audio_url} fields. Returns {@code null} when no row exists.
+	 */
+	public OlafResourceMetadataExt getMetadataExt(long identifier) {
 		try (Connection conn = getConnection();
 			 PreparedStatement ps = conn.prepareStatement(
-					 "SELECT resource_id, path, duration, num_fingerprints FROM olaf_metadata FINAL WHERE resource_id = ?")) {
+					 "SELECT resource_id, path, duration, num_fingerprints, title, audio_url FROM olaf_metadata FINAL WHERE resource_id = ?")) {
 			ps.setLong(1, identifier);
 			try (ResultSet rs = ps.executeQuery()) {
 				if (rs.next()) {
@@ -245,7 +282,11 @@ public class OlafStorageClickHouse implements OlafStorage {
 					meta.path = rs.getString("path");
 					meta.duration = rs.getFloat("duration");
 					meta.numFingerprints = rs.getInt("num_fingerprints");
-					return meta;
+					String title = rs.getString("title");
+					if (rs.wasNull()) title = null;
+					String audioUrl = rs.getString("audio_url");
+					if (rs.wasNull()) audioUrl = null;
+					return new OlafResourceMetadataExt(meta, title, audioUrl);
 				}
 			}
 		} catch (SQLException e) {

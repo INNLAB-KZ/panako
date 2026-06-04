@@ -5,13 +5,17 @@ import be.panako.strategy.olaf.OlafFingerprint;
 import be.panako.strategy.olaf.OlafMatch;
 import be.panako.strategy.olaf.storage.OlafHit;
 import be.panako.strategy.olaf.storage.OlafResourceMetadata;
+import be.panako.strategy.olaf.storage.OlafResourceMetadataExt;
 import be.panako.strategy.olaf.storage.OlafStorage;
+import be.panako.strategy.olaf.storage.OlafStorageClickHouse;
 import be.panako.strategy.panako.PanakoEventPointProcessor;
 import be.panako.strategy.panako.PanakoFingerprint;
 import be.panako.strategy.panako.PanakoMatch;
 import be.panako.strategy.panako.storage.PanakoHit;
 import be.panako.strategy.panako.storage.PanakoResourceMetadata;
+import be.panako.strategy.panako.storage.PanakoResourceMetadataExt;
 import be.panako.strategy.panako.storage.PanakoStorage;
+import be.panako.strategy.panako.storage.PanakoStorageClickHouse;
 import be.panako.util.Config;
 import be.panako.util.Key;
 import be.tarsos.dsp.util.PitchConverter;
@@ -86,11 +90,13 @@ public class QueryFingerprintsHandler implements HttpHandler {
 			int maxResults = Config.getInt(Key.NUMBER_OF_QUERY_RESULTS);
 			Set<Integer> avoid = new HashSet<>();
 
+			Map<Integer, OlafResourceMetadataExt> olafExtras = new HashMap<>();
+			Map<Integer, PanakoResourceMetadataExt> panakoExtras = new HashMap<>();
 			List<QueryResult> queryResults;
 			if (isOlaf) {
-				queryResults = doQueryOlaf(arrayContent, maxResults, avoid);
+				queryResults = doQueryOlaf(arrayContent, maxResults, avoid, olafExtras);
 			} else {
-				queryResults = doQueryPanako(arrayContent, maxResults, avoid);
+				queryResults = doQueryPanako(arrayContent, maxResults, avoid, panakoExtras);
 			}
 
 			long processingTimeMs = System.currentTimeMillis() - startTime;
@@ -112,9 +118,21 @@ public class QueryFingerprintsHandler implements HttpHandler {
 				if (i > 0) json.append(",");
 				json.append("{");
 				String isrc = HttpUtil.extractIsrc(r.refPath);
+				String title = null;
+				String audioUrl = null;
+				int idInt = parseIdentifier(r.refIdentifier);
+				if (isOlaf) {
+					OlafResourceMetadataExt ext = olafExtras.get(idInt);
+					if (ext != null) { title = ext.title; audioUrl = ext.audioUrl; }
+				} else {
+					PanakoResourceMetadataExt ext = panakoExtras.get(idInt);
+					if (ext != null) { title = ext.title; audioUrl = ext.audioUrl; }
+				}
 				json.append("\"identifier\":").append(r.refIdentifier).append(",");
 				json.append("\"isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\",");
 				json.append("\"filename\":\"").append(HttpUtil.escapeJson(r.refPath)).append("\",");
+				json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title)).append(",");
+				json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(audioUrl)).append(",");
 				json.append("\"match_start_seconds\":").append(String.format("%.1f", r.refStart)).append(",");
 				json.append("\"match_end_seconds\":").append(String.format("%.1f", r.refStop)).append(",");
 				json.append("\"query_start_seconds\":").append(String.format("%.1f", r.queryStart)).append(",");
@@ -139,7 +157,8 @@ public class QueryFingerprintsHandler implements HttpHandler {
 
 	// ===================== OLAF QUERY =====================
 
-	private List<QueryResult> doQueryOlaf(String arrayContent, int maxNumberOfResults, Set<Integer> avoid) {
+	private List<QueryResult> doQueryOlaf(String arrayContent, int maxNumberOfResults, Set<Integer> avoid,
+										  Map<Integer, OlafResourceMetadataExt> extras) {
 		List<OlafFingerprint> prints = new ArrayList<>();
 		int pos = 0;
 		while (pos < arrayContent.length()) {
@@ -251,7 +270,7 @@ public class QueryFingerprintsHandler implements HttpHandler {
 						float refStart = olafBlocksToSeconds(filteredHits.get(0).matchTime);
 						float refStop = olafBlocksToSeconds(filteredHits.get(filteredHits.size() - 1).matchTime);
 
-						OlafResourceMetadata metadata = db.getMetadata((long) identifier);
+						OlafResourceMetadata metadata = lookupOlafMetadata(db, identifier, extras);
 						String refPath = "metadata unavailable!";
 						if (metadata != null) refPath = metadata.path;
 
@@ -315,7 +334,7 @@ public class QueryFingerprintsHandler implements HttpHandler {
 						float refStart = olafBlocksToSeconds(filteredHits.get(0).matchTime);
 						float refStop = olafBlocksToSeconds(filteredHits.get(filteredHits.size() - 1).matchTime);
 
-						OlafResourceMetadata metadata = db.getMetadata((long) identifier);
+						OlafResourceMetadata metadata = lookupOlafMetadata(db, identifier, extras);
 						String refPath = "metadata unavailable!";
 						if (metadata != null) refPath = metadata.path;
 
@@ -347,6 +366,49 @@ public class QueryFingerprintsHandler implements HttpHandler {
 		return queryResults;
 	}
 
+	/**
+	 * Resolve OLAF metadata for {@code identifier}. When ClickHouse is the active
+	 * storage backend the extended row (with {@code title} / {@code audio_url})
+	 * is fetched and cached into {@code extras} for later response rendering.
+	 * Other backends return only the base metadata.
+	 */
+	private static OlafResourceMetadata lookupOlafMetadata(OlafStorage db, int identifier,
+														   Map<Integer, OlafResourceMetadataExt> extras) {
+		if (Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+			OlafResourceMetadataExt ext = OlafStorageClickHouse.getInstance().getMetadataExt((long) identifier);
+			if (ext != null) {
+				extras.put(identifier, ext);
+				return ext.base;
+			}
+			return null;
+		}
+		return db.getMetadata((long) identifier);
+	}
+
+	/** PANAKO counterpart of {@link #lookupOlafMetadata}. */
+	private static PanakoResourceMetadata lookupPanakoMetadata(PanakoStorage db, int identifier,
+															   Map<Integer, PanakoResourceMetadataExt> extras) {
+		if (Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+			PanakoResourceMetadataExt ext = PanakoStorageClickHouse.getInstance().getMetadataExt((long) identifier);
+			if (ext != null) {
+				extras.put(identifier, ext);
+				return ext.base;
+			}
+			return null;
+		}
+		return db.getMetadata((long) identifier);
+	}
+
+	/** Parse the string identifier embedded in {@link QueryResult#refIdentifier}. */
+	private static int parseIdentifier(String value) {
+		if (value == null) return 0;
+		try {
+			return Integer.parseInt(value.trim());
+		} catch (NumberFormatException e) {
+			return 0;
+		}
+	}
+
 	private int mostCommonDeltaTOlaf(List<OlafMatch> hitList) {
 		Map<Integer, Integer> countPerDiff = new HashMap<>();
 		for (OlafMatch hit : hitList) {
@@ -365,7 +427,8 @@ public class QueryFingerprintsHandler implements HttpHandler {
 
 	// ===================== PANAKO QUERY =====================
 
-	private List<QueryResult> doQueryPanako(String arrayContent, int maxNumberOfResults, Set<Integer> avoid) {
+	private List<QueryResult> doQueryPanako(String arrayContent, int maxNumberOfResults, Set<Integer> avoid,
+											Map<Integer, PanakoResourceMetadataExt> extras) {
 		List<PanakoFingerprint> prints = new ArrayList<>();
 		int pos = 0;
 		while (pos < arrayContent.length()) {
@@ -485,7 +548,7 @@ public class QueryFingerprintsHandler implements HttpHandler {
 						float refStart = panakoBlocksToSeconds(filteredHits.get(0).matchTime);
 						float refStop = panakoBlocksToSeconds(filteredHits.get(filteredHits.size() - 1).matchTime);
 
-						PanakoResourceMetadata metadata = db.getMetadata((long) identifier);
+						PanakoResourceMetadata metadata = lookupPanakoMetadata(db, identifier, extras);
 						String refPath = "metadata unavailable!";
 						if (metadata != null) refPath = metadata.path;
 

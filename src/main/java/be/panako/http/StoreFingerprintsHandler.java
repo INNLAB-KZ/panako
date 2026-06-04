@@ -22,6 +22,8 @@ import java.util.logging.Logger;
  *   "filename": "track.mp3",
  *   "identifier": 12345,
  *   "duration": 180.5,
+ *   "title": "Artist:Track",
+ *   "audio_url": "https://example.com/track.mp3",
  *   "fingerprints": [
  *     {"hash": 123456789, "t1": 10, "f1": 200},
  *     ...
@@ -30,6 +32,9 @@ import java.util.logging.Logger;
  * }</pre>
  *
  * <p>The {@code identifier} field is optional. If omitted, it is derived from the filename.</p>
+ * <p>The {@code title} and {@code audio_url} fields are optional descriptive metadata used by
+ * deployments that index tracks without an ISRC; they are persisted only when the storage
+ * backend is ClickHouse.</p>
  * <p>The {@code f1} field is only used by the PANAKO strategy; OLAF ignores it.</p>
  *
  * <p>Supports both OLAF and PANAKO strategies based on server configuration.</p>
@@ -73,6 +78,9 @@ public class StoreFingerprintsHandler implements HttpHandler {
 				return;
 			}
 
+			String title = extractJsonString(body, "title");
+			String audioUrl = extractJsonString(body, "audio_url");
+
 			int arrayStart = body.indexOf("\"fingerprints\"");
 			if (arrayStart == -1) {
 				HttpUtil.sendError(exchange, 400, "Missing 'fingerprints' in JSON body");
@@ -93,9 +101,9 @@ public class StoreFingerprintsHandler implements HttpHandler {
 			writeLock.lock();
 			try {
 				if (isOlaf) {
-					count = storeOlaf(arrayContent, identifier, filename, (float) duration);
+					count = storeOlaf(arrayContent, identifier, filename, (float) duration, title, audioUrl);
 				} else {
-					count = storePanako(arrayContent, identifier, filename, (float) duration);
+					count = storePanako(arrayContent, identifier, filename, (float) duration, title, audioUrl);
 				}
 				if (count == -1) {
 					// already_exists
@@ -118,6 +126,8 @@ public class StoreFingerprintsHandler implements HttpHandler {
 			json.append("\"identifier\":").append(identifier).append(",");
 			json.append("\"isrc\":\"").append(HttpUtil.escapeJson(isrc != null ? isrc : "")).append("\",");
 			json.append("\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\",");
+			json.append("\"title\":").append(jsonNullableString(title)).append(",");
+			json.append("\"audio_url\":").append(jsonNullableString(audioUrl)).append(",");
 			json.append("\"duration_seconds\":").append(String.format("%.1f", duration)).append(",");
 			json.append("\"fingerprints_count\":").append(count).append(",");
 			json.append("\"processing_time_ms\":").append(processingTimeMs);
@@ -131,7 +141,8 @@ public class StoreFingerprintsHandler implements HttpHandler {
 		}
 	}
 
-	private int storeOlaf(String arrayContent, int identifier, String filename, float duration) {
+	private int storeOlaf(String arrayContent, int identifier, String filename, float duration,
+						  String title, String audioUrl) {
 		OlafStorage db = getOlafStorage();
 		OlafResourceMetadata existing = db.getMetadata(identifier);
 		if (existing != null) {
@@ -163,11 +174,12 @@ public class StoreFingerprintsHandler implements HttpHandler {
 		}
 
 		db.processStoreQueue();
-		db.storeMetadata(identifier, filename, duration, count);
+		storeOlafMetadataWithExtras(db, identifier, filename, duration, count, title, audioUrl);
 		return count;
 	}
 
-	private int storePanako(String arrayContent, int identifier, String filename, float duration) {
+	private int storePanako(String arrayContent, int identifier, String filename, float duration,
+							String title, String audioUrl) {
 		PanakoStorage db = getPanakoStorage();
 		PanakoResourceMetadata existing = db.getMetadata(identifier);
 		if (existing != null) {
@@ -199,7 +211,7 @@ public class StoreFingerprintsHandler implements HttpHandler {
 		}
 
 		db.processStoreQueue();
-		db.storeMetadata(identifier, filename, duration, count);
+		storePanakoMetadataWithExtras(db, identifier, filename, duration, count, title, audioUrl);
 		return count;
 	}
 
@@ -207,12 +219,34 @@ public class StoreFingerprintsHandler implements HttpHandler {
 		String isrc = HttpUtil.extractIsrc(filename);
 		double dur = 0;
 		int fpCount = 0;
+		String title = null;
+		String audioUrl = null;
 		if (isOlaf) {
-			OlafResourceMetadata meta = getOlafStorage().getMetadata(identifier);
-			if (meta != null) { dur = meta.duration; fpCount = meta.numFingerprints; }
+			if (Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+				OlafResourceMetadataExt ext = OlafStorageClickHouse.getInstance().getMetadataExt(identifier);
+				if (ext != null) {
+					dur = ext.base.duration;
+					fpCount = ext.base.numFingerprints;
+					title = ext.title;
+					audioUrl = ext.audioUrl;
+				}
+			} else {
+				OlafResourceMetadata meta = getOlafStorage().getMetadata(identifier);
+				if (meta != null) { dur = meta.duration; fpCount = meta.numFingerprints; }
+			}
 		} else {
-			PanakoResourceMetadata meta = getPanakoStorage().getMetadata(identifier);
-			if (meta != null) { dur = meta.duration; fpCount = meta.numFingerprints; }
+			if (Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+				PanakoResourceMetadataExt ext = PanakoStorageClickHouse.getInstance().getMetadataExt(identifier);
+				if (ext != null) {
+					dur = ext.base.duration;
+					fpCount = ext.base.numFingerprints;
+					title = ext.title;
+					audioUrl = ext.audioUrl;
+				}
+			} else {
+				PanakoResourceMetadata meta = getPanakoStorage().getMetadata(identifier);
+				if (meta != null) { dur = meta.duration; fpCount = meta.numFingerprints; }
+			}
 		}
 		StringBuilder json = new StringBuilder();
 		json.append("{");
@@ -220,10 +254,60 @@ public class StoreFingerprintsHandler implements HttpHandler {
 		json.append("\"identifier\":").append(identifier).append(",");
 		json.append("\"isrc\":\"").append(HttpUtil.escapeJson(isrc != null ? isrc : "")).append("\",");
 		json.append("\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\",");
+		json.append("\"title\":").append(jsonNullableString(title)).append(",");
+		json.append("\"audio_url\":").append(jsonNullableString(audioUrl)).append(",");
 		json.append("\"duration_seconds\":").append(String.format("%.1f", (double) dur)).append(",");
 		json.append("\"fingerprints_count\":").append(fpCount);
 		json.append("}");
 		HttpUtil.sendJson(exchange, 200, json.toString());
+	}
+
+	/**
+	 * Persist OLAF metadata, additionally writing {@code title} and {@code audio_url}
+	 * to the ClickHouse-backed extension table when those extras are present and the
+	 * configured storage backend is ClickHouse. Non-ClickHouse backends (LMDB, file,
+	 * in-memory) silently drop the extras since their schema has no place for them.
+	 */
+	static void storeOlafMetadataWithExtras(OlafStorage db, long resourceID, String resourcePath,
+											float duration, int count, String title, String audioUrl) {
+		boolean hasExtras = title != null || audioUrl != null;
+		boolean isClickHouse = Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE");
+		if (hasExtras && isClickHouse) {
+			OlafStorageClickHouse.getInstance()
+					.storeMetadataExt(resourceID, resourcePath, duration, count, title, audioUrl);
+			// Also write through the configured (possibly caching) storage so any file-backed
+			// cache layer above ClickHouse stays in sync; ReplacingMergeTree dedupes the
+			// duplicate row in ClickHouse on the next background merge.
+			if (db != OlafStorageClickHouse.getInstance()) {
+				db.storeMetadata(resourceID, resourcePath, duration, count);
+			}
+		} else {
+			db.storeMetadata(resourceID, resourcePath, duration, count);
+		}
+	}
+
+	/**
+	 * PANAKO counterpart of {@link #storeOlafMetadataWithExtras}.
+	 */
+	static void storePanakoMetadataWithExtras(PanakoStorage db, long resourceID, String resourcePath,
+											  float duration, int count, String title, String audioUrl) {
+		boolean hasExtras = title != null || audioUrl != null;
+		boolean isClickHouse = Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("CLICKHOUSE");
+		if (hasExtras && isClickHouse) {
+			PanakoStorageClickHouse.getInstance()
+					.storeMetadataExt(resourceID, resourcePath, duration, count, title, audioUrl);
+			if (db != PanakoStorageClickHouse.getInstance()) {
+				db.storeMetadata(resourceID, resourcePath, duration, count);
+			}
+		} else {
+			db.storeMetadata(resourceID, resourcePath, duration, count);
+		}
+	}
+
+	/** Render a possibly-null string as a JSON value ({@code null} or {@code "..."}). */
+	static String jsonNullableString(String value) {
+		if (value == null) return "null";
+		return "\"" + HttpUtil.escapeJson(value) + "\"";
 	}
 
 	static OlafStorage getOlafStorage() {

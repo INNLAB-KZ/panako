@@ -4,24 +4,32 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * Minimal multipart/form-data parser that extracts a single file upload.
+ * Minimal multipart/form-data parser that extracts a single file upload along
+ * with any text-only form fields supplied alongside it.
  */
 public class MultipartParser {
 
 	/**
-	 * Result of parsing a multipart request.
+	 * Result of parsing a multipart request. {@link #formFields} contains every
+	 * non-file text part keyed by its {@code name} attribute (for example
+	 * {@code title} or {@code audio_url}). Callers that only need the uploaded
+	 * file can ignore the map.
 	 */
 	public static class UploadedFile {
 		public final String fieldName;
 		public final String fileName;
 		public final Path tempFile;
+		public final Map<String, String> formFields;
 
-		public UploadedFile(String fieldName, String fileName, Path tempFile) {
+		public UploadedFile(String fieldName, String fileName, Path tempFile, Map<String, String> formFields) {
 			this.fieldName = fieldName;
 			this.fileName = fileName;
 			this.tempFile = tempFile;
+			this.formFields = formFields == null ? new HashMap<>() : formFields;
 		}
 	}
 
@@ -45,6 +53,11 @@ public class MultipartParser {
 
 		int pos = indexOf(body, boundaryBytes, 0);
 		if (pos == -1) return null;
+
+		Map<String, String> formFields = new HashMap<>();
+		String foundFieldName = null;
+		String foundFileName = null;
+		Path foundTempFile = null;
 
 		while (pos < body.length) {
 			// Move past boundary
@@ -77,21 +90,32 @@ public class MultipartParser {
 			String fieldName = extractHeaderParam(headers, "name");
 
 			if (fileName != null && !fileName.isEmpty()) {
-				// Write content to temp file
-				String extension = "";
-				int dot = fileName.lastIndexOf('.');
-				if (dot >= 0) extension = fileName.substring(dot);
-				Path tempFile = Files.createTempFile("panako_upload_", extension);
-				try (OutputStream out = Files.newOutputStream(tempFile)) {
-					out.write(body, pos, contentEnd - pos);
+				// File part: write content to temp file. Capture only the first
+				// file part; subsequent file parts are ignored so callers that
+				// expect a single upload behave as before.
+				if (foundTempFile == null) {
+					String extension = "";
+					int dot = fileName.lastIndexOf('.');
+					if (dot >= 0) extension = fileName.substring(dot);
+					Path tempFile = Files.createTempFile("panako_upload_", extension);
+					try (OutputStream out = Files.newOutputStream(tempFile)) {
+						out.write(body, pos, contentEnd - pos);
+					}
+					foundFieldName = fieldName;
+					foundFileName = fileName;
+					foundTempFile = tempFile;
 				}
-				return new UploadedFile(fieldName, fileName, tempFile);
+			} else if (fieldName != null && !fieldName.isEmpty()) {
+				// Text form field. UTF-8 decoded because callers expect human strings.
+				String value = new String(body, pos, contentEnd - pos, StandardCharsets.UTF_8);
+				formFields.put(fieldName, value);
 			}
 
 			pos = nextBoundary;
 		}
 
-		return null;
+		if (foundTempFile == null) return null;
+		return new UploadedFile(foundFieldName, foundFileName, foundTempFile, formFields);
 	}
 
 	private static String extractBoundary(String contentType) {

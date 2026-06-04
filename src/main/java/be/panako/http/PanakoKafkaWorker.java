@@ -2,6 +2,8 @@ package be.panako.http;
 
 import be.panako.strategy.QueryResult;
 import be.panako.strategy.Strategy;
+import be.panako.strategy.olaf.storage.OlafStorageClickHouse;
+import be.panako.strategy.panako.storage.PanakoStorageClickHouse;
 import be.panako.util.Config;
 import be.panako.util.FileUtils;
 import be.panako.util.Key;
@@ -268,6 +270,7 @@ public class PanakoKafkaWorker implements Runnable {
 		String body = record.value();
 		String audioUrl = extractJsonString(body, "audio_url");
 		String filename = extractJsonString(body, "filename");
+		String title = extractJsonString(body, "title");
 		String requestId = extractJsonString(body, "recording_id");
 		if (requestId == null) requestId = extractJsonString(body, "request_id");
 
@@ -310,6 +313,8 @@ public class PanakoKafkaWorker implements Runnable {
 					json.append(",\"identifier\":").append(identifier);
 					json.append(",\"isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\"");
 					json.append(",\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\"");
+					json.append(",\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title));
+					json.append(",\"audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\"");
 					json.append(",\"duration_seconds\":").append(String.format("%.1f", meta[0]));
 					json.append(",\"fingerprints_count\":").append((int) meta[1]);
 					json.append("}");
@@ -331,12 +336,15 @@ public class PanakoKafkaWorker implements Runnable {
 			long processingTimeMs = System.currentTimeMillis() - startTime;
 			int fpCount = (int) Math.round(durationInSeconds * 7);
 
+			persistExtras(identifier, filename, (float) durationInSeconds, fpCount, title, audioUrl);
+
 			StringBuilder json = new StringBuilder();
 			json.append("{\"status\":\"ok\"");
 			json.append(",\"request_id\":\"").append(HttpUtil.escapeJson(requestId != null ? requestId : "")).append("\"");
 			json.append(",\"identifier\":").append(identifier);
 			json.append(",\"isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\"");
 			json.append(",\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\"");
+			json.append(",\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title));
 			json.append(",\"audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\"");
 			json.append(",\"duration_seconds\":").append(String.format("%.1f", durationInSeconds));
 			json.append(",\"fingerprints_count\":").append(fpCount);
@@ -489,6 +497,38 @@ public class PanakoKafkaWorker implements Runnable {
 		if (num.length() == 0) return -1;
 		try { return Integer.parseInt(num.toString()); }
 		catch (NumberFormatException e) { return -1; }
+	}
+
+	/**
+	 * Persist the optional {@code title} and {@code audio_url} extras to the
+	 * ClickHouse-backed metadata table for the configured strategy. The upstream
+	 * {@link Strategy#store} call has already written the base metadata row;
+	 * this issues a second {@code INSERT} with the full column set so
+	 * {@code ReplacingMergeTree} replaces it on the next background merge.
+	 *
+	 * <p>No-op when ClickHouse is not the active storage backend, or when both
+	 * extras are {@code null} / empty.</p>
+	 */
+	private static void persistExtras(int identifier, String filename, float duration,
+									  int fingerprintCount, String title, String audioUrl) {
+		boolean titlePresent = title != null && !title.isEmpty();
+		boolean urlPresent = audioUrl != null && !audioUrl.isEmpty();
+		if (!titlePresent && !urlPresent) return;
+
+		boolean isOlaf = Config.get(Key.STRATEGY).equalsIgnoreCase("OLAF");
+		if (isOlaf) {
+			if (Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+				OlafStorageClickHouse.getInstance().storeMetadataExt(
+						identifier, filename, duration, fingerprintCount,
+						titlePresent ? title : null, urlPresent ? audioUrl : null);
+			}
+		} else {
+			if (Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+				PanakoStorageClickHouse.getInstance().storeMetadataExt(
+						identifier, filename, duration, fingerprintCount,
+						titlePresent ? title : null, urlPresent ? audioUrl : null);
+			}
+		}
 	}
 
 	private void send(String topic, String key, String value) {

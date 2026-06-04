@@ -4,6 +4,10 @@ import be.panako.strategy.QueryResult;
 import be.panako.strategy.QueryResultHandler;
 import be.panako.strategy.Strategy;
 import be.panako.strategy.olaf.OlafStrategy;
+import be.panako.strategy.olaf.storage.OlafResourceMetadataExt;
+import be.panako.strategy.olaf.storage.OlafStorageClickHouse;
+import be.panako.strategy.panako.storage.PanakoResourceMetadataExt;
+import be.panako.strategy.panako.storage.PanakoStorageClickHouse;
 import be.panako.util.Config;
 import be.panako.util.Key;
 import com.sun.net.httpserver.HttpExchange;
@@ -549,6 +553,7 @@ public class MonitorHandler implements HttpHandler {
 			m.identifier = first.refIdentifier;
 			m.isrc = HttpUtil.extractIsrc(first.refPath);
 			m.filename = first.refPath;
+			populateExtras(m);
 
 			// Resolve effective gap threshold: cap by half of the track duration
 			// when known, so very short tracks cannot legitimately span huge gaps.
@@ -621,6 +626,8 @@ public class MonitorHandler implements HttpHandler {
 			json.append("\"identifier\":").append(m.identifier).append(",");
 			json.append("\"isrc\":\"").append(HttpUtil.escapeJson(m.isrc)).append("\",");
 			json.append("\"filename\":\"").append(HttpUtil.escapeJson(m.filename)).append("\",");
+			json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(m.title)).append(",");
+			json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(m.audioUrl)).append(",");
 			json.append("\"query_start_seconds\":").append(String.format("%.1f", m.queryStart)).append(",");
 			json.append("\"query_start_time\":\"").append(formatTime(m.queryStart)).append("\",");
 			json.append("\"query_end_seconds\":").append(String.format("%.1f", m.queryEnd)).append(",");
@@ -894,10 +901,37 @@ public class MonitorHandler implements HttpHandler {
 		}
 	}
 
+	/**
+	 * Populate {@link MergedMatch#title} and {@link MergedMatch#audioUrl} from the
+	 * ClickHouse metadata table when ClickHouse is the active storage backend for
+	 * the configured strategy. Other backends leave the fields {@code null}, which
+	 * surfaces as JSON {@code null} in the monitor response.
+	 */
+	private static void populateExtras(MergedMatch m) {
+		int idInt;
+		try {
+			idInt = Integer.parseInt(m.identifier.trim());
+		} catch (Exception e) {
+			return;
+		}
+		boolean isOlaf = Config.get(Key.STRATEGY).equalsIgnoreCase("OLAF");
+		if (isOlaf) {
+			if (!Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE")) return;
+			OlafResourceMetadataExt ext = OlafStorageClickHouse.getInstance().getMetadataExt((long) idInt);
+			if (ext != null) { m.title = ext.title; m.audioUrl = ext.audioUrl; }
+		} else {
+			if (!Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("CLICKHOUSE")) return;
+			PanakoResourceMetadataExt ext = PanakoStorageClickHouse.getInstance().getMetadataExt((long) idInt);
+			if (ext != null) { m.title = ext.title; m.audioUrl = ext.audioUrl; }
+		}
+	}
+
 	static class MergedMatch {
 		String identifier;
 		String isrc;
 		String filename;
+		String title;
+		String audioUrl;
 		double queryStart;
 		double queryEnd;
 		double refStart;

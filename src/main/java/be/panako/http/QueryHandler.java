@@ -3,6 +3,10 @@ package be.panako.http;
 import be.panako.strategy.QueryResult;
 import be.panako.strategy.QueryResultHandler;
 import be.panako.strategy.Strategy;
+import be.panako.strategy.olaf.storage.OlafResourceMetadataExt;
+import be.panako.strategy.olaf.storage.OlafStorageClickHouse;
+import be.panako.strategy.panako.storage.PanakoResourceMetadataExt;
+import be.panako.strategy.panako.storage.PanakoStorageClickHouse;
 import be.panako.util.Config;
 import be.panako.util.Key;
 import com.sun.net.httpserver.HttpExchange;
@@ -95,9 +99,12 @@ public class QueryHandler implements HttpHandler {
 				if (i > 0) json.append(",");
 				json.append("{");
 				String isrc = HttpUtil.extractIsrc(r.refPath);
+				String[] extras = lookupExtras(r.refIdentifier);
 				json.append("\"identifier\":").append(r.refIdentifier).append(",");
 				json.append("\"isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\",");
 				json.append("\"filename\":\"").append(HttpUtil.escapeJson(r.refPath)).append("\",");
+				json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(extras[0])).append(",");
+				json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(extras[1])).append(",");
 				json.append("\"match_start_seconds\":").append(String.format("%.1f", r.refStart)).append(",");
 				json.append("\"match_end_seconds\":").append(String.format("%.1f", r.refStop)).append(",");
 				json.append("\"query_start_seconds\":").append(String.format("%.1f", r.queryStart)).append(",");
@@ -124,6 +131,33 @@ public class QueryHandler implements HttpHandler {
 			if (upload != null) {
 				try { Files.deleteIfExists(upload.tempFile); } catch (IOException ignored) {}
 			}
+		}
+	}
+
+	/**
+	 * Resolve {@code title} and {@code audio_url} extras for the given reference
+	 * identifier when ClickHouse is the active storage backend. Returns a
+	 * two-element array {@code [title, audioUrl]}; either element may be
+	 * {@code null} when the value is absent or the backend is not ClickHouse.
+	 */
+	private static String[] lookupExtras(String refIdentifier) {
+		String[] empty = new String[]{null, null};
+		if (refIdentifier == null) return empty;
+		int idInt;
+		try {
+			idInt = Integer.parseInt(refIdentifier.trim());
+		} catch (NumberFormatException e) {
+			return empty;
+		}
+		boolean isOlaf = Config.get(Key.STRATEGY).equalsIgnoreCase("OLAF");
+		if (isOlaf) {
+			if (!Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE")) return empty;
+			OlafResourceMetadataExt ext = OlafStorageClickHouse.getInstance().getMetadataExt((long) idInt);
+			return ext == null ? empty : new String[]{ext.title, ext.audioUrl};
+		} else {
+			if (!Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("CLICKHOUSE")) return empty;
+			PanakoResourceMetadataExt ext = PanakoStorageClickHouse.getInstance().getMetadataExt((long) idInt);
+			return ext == null ? empty : new String[]{ext.title, ext.audioUrl};
 		}
 	}
 

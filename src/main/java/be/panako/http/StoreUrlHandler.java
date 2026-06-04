@@ -1,7 +1,11 @@
 package be.panako.http;
 
 import be.panako.strategy.Strategy;
+import be.panako.strategy.olaf.storage.OlafStorageClickHouse;
+import be.panako.strategy.panako.storage.PanakoStorageClickHouse;
+import be.panako.util.Config;
 import be.panako.util.FileUtils;
+import be.panako.util.Key;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
@@ -21,8 +25,11 @@ import java.util.logging.Logger;
 /**
  * POST /api/v1/store/url — stores audio fingerprints by downloading from a URL.
  *
- * <p>Accepts JSON: {@code {"audio_url": "https://example.com/track.mp3", "filename": "track.mp3"}}</p>
+ * <p>Accepts JSON: {@code {"audio_url": "https://example.com/track.mp3", "filename": "track.mp3",
+ * "title": "Artist:Track"}}</p>
  * <p>The {@code filename} field is optional. If omitted, it is derived from the URL path.</p>
+ * <p>The {@code title} field is optional descriptive metadata. Together with {@code audio_url}
+ * it is persisted to the ClickHouse metadata table when ClickHouse storage is configured.</p>
  */
 public class StoreUrlHandler implements HttpHandler {
 
@@ -63,6 +70,8 @@ public class StoreUrlHandler implements HttpHandler {
 				filename = "audio.mp3";
 			}
 
+			String title = extractJsonString(body, "title");
+
 			// Download the audio file
 			Path tempFile = Files.createTempFile("panako_dl_", "_" + filename);
 			try {
@@ -91,6 +100,8 @@ public class StoreUrlHandler implements HttpHandler {
 					json.append("\"identifier\":").append(identifier).append(",");
 					json.append("\"isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\",");
 					json.append("\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\",");
+					json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title)).append(",");
+					json.append("\"audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\",");
 					json.append("\"duration_seconds\":").append(String.format("%.1f", meta[0])).append(",");
 					json.append("\"fingerprints_count\":").append((int) meta[1]);
 					json.append("}");
@@ -119,6 +130,8 @@ public class StoreUrlHandler implements HttpHandler {
 			long processingTimeMs = System.currentTimeMillis() - startTime;
 			int fingerprintCount = (int) Math.round(durationInSeconds * 7);
 
+			persistExtras(identifier, filename, (float) durationInSeconds, fingerprintCount, title, audioUrl);
+
 			StringBuilder json = new StringBuilder();
 			json.append("{");
 
@@ -126,6 +139,7 @@ public class StoreUrlHandler implements HttpHandler {
 			json.append("\"identifier\":").append(identifier).append(",");
 			json.append("\"isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\",");
 			json.append("\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\",");
+			json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title)).append(",");
 			json.append("\"audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\",");
 			json.append("\"duration_seconds\":").append(String.format("%.1f", durationInSeconds)).append(",");
 			json.append("\"fingerprints_count\":").append(fingerprintCount).append(",");
@@ -143,6 +157,38 @@ public class StoreUrlHandler implements HttpHandler {
 		} finally {
 			if (audioFile != null) {
 				try { Files.deleteIfExists(audioFile); } catch (IOException ignored) {}
+			}
+		}
+	}
+
+	/**
+	 * Persist the optional {@code title} and {@code audio_url} extras to the
+	 * ClickHouse-backed metadata table for the configured strategy. The upstream
+	 * {@link Strategy#store} call has already inserted the base metadata row;
+	 * this issues a second {@code INSERT} with the full column set so
+	 * {@code ReplacingMergeTree} replaces it on the next background merge.
+	 *
+	 * <p>No-op when ClickHouse is not the active storage backend, or when both
+	 * extras are {@code null} / empty.</p>
+	 */
+	private static void persistExtras(int identifier, String filename, float duration,
+									  int fingerprintCount, String title, String audioUrl) {
+		boolean titlePresent = title != null && !title.isEmpty();
+		boolean urlPresent = audioUrl != null && !audioUrl.isEmpty();
+		if (!titlePresent && !urlPresent) return;
+
+		boolean isOlaf = Config.get(Key.STRATEGY).equalsIgnoreCase("OLAF");
+		if (isOlaf) {
+			if (Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+				OlafStorageClickHouse.getInstance().storeMetadataExt(
+						identifier, filename, duration, fingerprintCount,
+						titlePresent ? title : null, urlPresent ? audioUrl : null);
+			}
+		} else {
+			if (Config.get(Key.PANAKO_STORAGE).equalsIgnoreCase("CLICKHOUSE")) {
+				PanakoStorageClickHouse.getInstance().storeMetadataExt(
+						identifier, filename, duration, fingerprintCount,
+						titlePresent ? title : null, urlPresent ? audioUrl : null);
 			}
 		}
 	}
