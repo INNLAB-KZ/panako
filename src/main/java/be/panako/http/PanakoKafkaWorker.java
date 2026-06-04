@@ -172,6 +172,8 @@ public class PanakoKafkaWorker implements Runnable {
 		consumerProps.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "1");
 		consumerProps.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "1800000"); // 30 minutes
 		consumerProps.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "30000");
+		consumerProps.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
+				"org.apache.kafka.clients.consumer.CooperativeStickyAssignor");
 		this.consumer = new KafkaConsumer<>(consumerProps);
 
 		// Producer config
