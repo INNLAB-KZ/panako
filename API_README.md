@@ -7,7 +7,6 @@ Filename is used as stable identifier key — files named `ISRC.mp3`, `ISRC.aac`
 ## Build
 
 ```bash
-export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 ./gradlew shadowJar
 ```
 
@@ -27,34 +26,68 @@ With custom parameters:
 java --add-opens=java.base/java.nio=ALL-UNNAMED \
   -cp build/libs/panako-2.1-all.jar \
   be.panako.http.PanakoHttpServer \
-  STRATEGY=PANAKO \
-  PANAKO_STORAGE=CLICKHOUSE \
-  PANAKO_CLICKHOUSE_URL=jdbc:ch://localhost:8123/default
+  SERVER_PORT=9090 \
+  STRATEGY=OLAF \
+  SERVER_THREAD_POOL_SIZE=10
+```
+
+### CLI (unchanged)
+
+All existing CLI commands work as before:
+
+```bash
+java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.jar store audio.mp3
+java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.jar query fragment.mp3
+java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.jar stats
 ```
 
 ### Docker
 
 ```bash
-docker compose up
-```
-
-Stack includes: Panako + ClickHouse + Kafka. API available at `http://localhost:8344`.
-
-Build and push image:
-
-```bash
-export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 ./gradlew shadowJar
 docker buildx build --platform linux/amd64,linux/arm64 -t innlabkz/ozen-panako:latest --push .
 ```
 
-### CLI (unchanged)
+Or run with docker compose:
 
 ```bash
-java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.jar store audio.mp3
-java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.jar query fragment.mp3
-java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.jar monitor radio.mp3
-java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.jar stats
+docker compose up
+```
+
+The API will be available at `http://localhost:8344` (mapped to container port 8080).
+
+Database files are persisted in `./data/panako-db`.
+
+## Authentication
+
+All endpoints except `/api/v1/health` require an API key when `API_KEY` is configured.
+
+Pass the key via `X-API-Key` header (recommended) or `api_key` query parameter:
+
+```bash
+# Header (recommended)
+curl -H "X-API-Key: your-secret-key" http://localhost:8080/api/v1/stats
+
+# Query parameter
+curl http://localhost:8080/api/v1/stats?api_key=your-secret-key
+```
+
+Set the key via environment variable or config:
+
+```bash
+# Environment variable
+API_KEY=your-secret-key
+
+# Docker compose (.env file)
+API_KEY=your-secret-key
+```
+
+If `API_KEY` is empty or not set, authentication is disabled (all requests allowed).
+
+Unauthorized requests receive:
+
+```json
+{"status": "error", "message": "Invalid or missing API key"}
 ```
 
 ## API Endpoints
@@ -64,8 +97,10 @@ java --add-opens=java.base/java.nio=ALL-UNNAMED -jar build/libs/panako-2.1-all.j
 Health check.
 
 ```bash
-curl http://localhost:8344/api/v1/health
+curl http://localhost:8080/api/v1/health
 ```
+
+Response:
 
 ```json
 {"status": "ok", "version": "2.1-api"}
@@ -76,15 +111,17 @@ curl http://localhost:8344/api/v1/health
 Database statistics.
 
 ```bash
-curl http://localhost:8344/api/v1/stats
+curl http://localhost:8080/api/v1/stats
 ```
+
+Response:
 
 ```json
 {
   "status": "ok",
   "fingerprint_count": 125000,
   "audio_items_count": 50,
-  "strategy": "PANAKO"
+  "strategy": "OLAF"
 }
 ```
 
@@ -95,7 +132,7 @@ Store audio fingerprints. Accepts `multipart/form-data` with field name `audio`.
 Filename should be `ISRC.ext` (e.g. `USRC17607839.mp3`). The ISRC is extracted and returned in the response.
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/store -F "audio=@USRC17607839.mp3"
+curl -X POST http://localhost:8080/api/v1/store -F "audio=@USRC17607839.mp3"
 ```
 
 Response:
@@ -112,7 +149,7 @@ Response:
 }
 ```
 
-If the same ISRC is already stored:
+If the same ISRC is already stored (duplicate):
 
 ```json
 {
@@ -125,27 +162,44 @@ If the same ISRC is already stored:
 }
 ```
 
-If a previous store was interrupted (incomplete data), the track is automatically deleted and re-stored.
-
 ### `POST /api/v1/store/url`
 
-Store audio by downloading from a URL. Accepts `application/json`.
+Store audio fingerprints by downloading from a URL. Accepts `application/json`.
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/store/url \
+curl -X POST http://localhost:8080/api/v1/store/url \
   -H "Content-Type: application/json" \
   -d '{"audio_url": "https://example.com/USRC17607839.mp3", "filename": "USRC17607839.mp3"}'
 ```
 
-- `audio_url` — required
-- `filename` — optional, derived from URL if omitted
+- `audio_url` — required, URL to download the audio from
+- `filename` — optional, if omitted it is derived from the URL path
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "identifier": 1612789453,
+  "isrc": "USRC17607839",
+  "filename": "USRC17607839.mp3",
+  "audio_url": "https://example.com/USRC17607839.mp3",
+  "duration_seconds": 195.4,
+  "fingerprints_count": 1250,
+  "processing_time_ms": 2430
+}
+```
+
+Duplicate check works the same as `POST /api/v1/store` (returns `already_exists` with `duration_seconds` and `fingerprints_count`).
 
 ### `POST /api/v1/store/fingerprints`
 
-Store pre-computed fingerprints directly (no audio needed). Accepts `application/json`.
+Store pre-computed fingerprints directly without sending audio. Accepts `application/json`.
+
+This is useful when fingerprints are extracted on the client side (e.g. via `panako print`) and only the compact fingerprint data needs to be sent to the server.
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/store/fingerprints \
+curl -X POST http://localhost:8080/api/v1/store/fingerprints \
   -H "Content-Type: application/json" \
   -d '{
     "filename": "USRC17607839.mp3",
@@ -157,18 +211,41 @@ curl -X POST http://localhost:8344/api/v1/store/fingerprints \
   }'
 ```
 
+- `filename` — required, used to derive identifier and ISRC
+- `duration` — required, audio duration in seconds
+- `identifier` — optional, if omitted it is derived from the filename
+- `fingerprints` — required, array of `{hash, t1, f1}` objects
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "identifier": 1612789453,
+  "isrc": "USRC17607839",
+  "filename": "USRC17607839.mp3",
+  "duration_seconds": 195.4,
+  "fingerprints_count": 2,
+  "processing_time_ms": 5
+}
+```
+
+Duplicate check works the same as other store endpoints.
+
 ### `POST /api/v1/query`
 
-Query for a single match. Accepts `multipart/form-data` with field name `audio`.
+Query for matches. Accepts `multipart/form-data` with field name `audio`.
 
-Results are validated:
-- **Quality**: score >= `MATCH_MIN_SCORE` and match_percentage >= `MATCH_MIN_PERCENTAGE`
-- **Density**: short clips (< 15s) need >= 8 matches; longer clips need >= max(duration x 0.15, 20)
-- **Duration**: query must not be longer than matched reference + 5 seconds
+Results are validated to filter false positives:
+- **Quality check**: score >= `MATCH_MIN_SCORE` (default 20) and match_percentage >= `MATCH_MIN_PERCENTAGE` (default 0.5)
+- **Match density**: short clips (< 15s) need >= 8 matches; longer clips need >= max(duration x 0.15, 20)
+- **Duration check**: query must not be longer than matched reference + 5 seconds
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/query -F "audio=@fragment.mp3"
+curl -X POST http://localhost:8080/api/v1/query -F "audio=@fragment.mp3"
 ```
+
+Response:
 
 ```json
 {
@@ -193,31 +270,41 @@ curl -X POST http://localhost:8344/api/v1/query -F "audio=@fragment.mp3"
 }
 ```
 
+No match returns `"matches": []`.
+
 ### `POST /api/v1/query/fingerprints`
 
-Query with pre-computed fingerprints. Accepts `application/json`.
+Query for matches using pre-computed fingerprints (no audio needed). Accepts `application/json`.
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/query/fingerprints \
+curl -X POST http://localhost:8080/api/v1/query/fingerprints \
   -H "Content-Type: application/json" \
-  -d '{"fingerprints": [{"hash": 123456789, "t1": 10, "f1": 200}]}'
+  -d '{
+    "fingerprints": [
+      {"hash": 123456789, "t1": 10, "f1": 200},
+      {"hash": 987654321, "t1": 20, "f1": 150}
+    ]
+  }'
 ```
+
+Response format is identical to `POST /api/v1/query`.
 
 ### `POST /api/v1/monitor`
 
-Monitor a long audio file and find all matching tracks. Accepts `multipart/form-data` with field name `audio`.
+Monitor a long audio file (e.g. radio recording) and find all matching tracks. The audio is split into overlapping windows and each window is queried separately. Results are **deduplicated by track** — multiple window hits for the same track are merged into a single entry with the overall time range. Accepts `multipart/form-data` with field name `audio`.
 
 **How it works:**
-1. Audio is split into overlapping windows (configurable via `MONITOR_STEP_SIZE` / `MONITOR_OVERLAP`)
+1. Audio is split into overlapping windows (configurable via `MONITOR_STEP_SIZE` and `MONITOR_OVERLAP`)
 2. Each window is queried against the fingerprint database
 3. Results are merged by track identifier with absolute timestamps
-4. **Boundary refinement**: additional queries to find precise start/end times
-5. **Waveform**: peak amplitude per second for the full recording
-6. False positives filtered by `MONITOR_MIN_SCORE` and `MONITOR_MIN_PERCENTAGE`
+4. **Boundary refinement**: if the match doesn't start at the beginning or end of the reference track, additional queries are made to find the precise start/end times
+5. False positives are filtered by `MONITOR_MIN_SCORE` and `MONITOR_MIN_PERCENTAGE`
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/monitor -F "audio=@radio_recording.mp3"
+curl -X POST http://localhost:8080/api/v1/monitor -F "audio=@radio_recording.mp3"
 ```
+
+Response:
 
 ```json
 {
@@ -240,19 +327,36 @@ curl -X POST http://localhost:8344/api/v1/monitor -F "audio=@radio_recording.mp3
       "frequency_factor": 1.000,
       "match_percentage": 1.0,
       "window_hits": 9
+    },
+    {
+      "identifier": 987654321,
+      "isrc": "GBAYE0601498",
+      "filename": "GBAYE0601498.mp3",
+      "query_start_seconds": 300.0,
+      "query_start_time": "00:05:00",
+      "query_end_seconds": 520.0,
+      "query_end_time": "00:08:40",
+      "match_start_seconds": 10.2,
+      "match_end_seconds": 230.0,
+      "score": 6000,
+      "time_factor": 1.000,
+      "frequency_factor": 1.000,
+      "match_percentage": 0.9,
+      "window_hits": 11
     }
-  ],
-  "waveform": [0.125, 0.340, 0.892, 0.654, ...]
+  ]
 }
 ```
+
+Response fields:
 
 | Field | Description |
 |---|---|
 | `unique_tracks_count` | Number of distinct tracks identified |
 | `query_start_seconds` | When the track starts in your recording (seconds) |
-| `query_start_time` | Same in `HH:mm:ss` format |
+| `query_start_time` | Same as above in `HH:mm:ss` format |
 | `query_end_seconds` | When the track ends in your recording (seconds) |
-| `query_end_time` | Same in `HH:mm:ss` format |
+| `query_end_time` | Same as above in `HH:mm:ss` format |
 | `match_start_seconds` | Where the match starts in the reference track |
 | `match_end_seconds` | Where the match ends in the reference track |
 | `score` | Total fingerprint hit count across all windows |
@@ -260,160 +364,83 @@ curl -X POST http://localhost:8344/api/v1/monitor -F "audio=@radio_recording.mp3
 | `frequency_factor` | Pitch shifting factor (1.0 = no change) |
 | `match_percentage` | Fraction of seconds with matching fingerprints (0.0-1.0) |
 | `window_hits` | How many monitoring windows matched this track |
-| `waveform` | Peak amplitude per second (0.0-1.0) for the full recording |
 
 ### `POST /api/v1/monitor/url`
 
 Monitor audio downloaded from a URL. Accepts `application/json`.
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/monitor/url \
+curl -X POST http://localhost:8080/api/v1/monitor/url \
   -H "Content-Type: application/json" \
   -d '{"audio_url": "https://example.com/radio_recording.mp3"}'
 ```
+
+- `audio_url` — required, URL to download the audio from
+- `filename` — optional, if omitted it is derived from the URL path
+
+Response format is identical to `POST /api/v1/monitor`.
 
 ### `POST /api/v1/delete`
 
 Delete fingerprints. Accepts `multipart/form-data` with the original audio file.
 
 ```bash
-curl -X POST http://localhost:8344/api/v1/delete -F "audio=@USRC17607839.mp3"
+curl -X POST http://localhost:8080/api/v1/delete -F "audio=@USRC17607839.mp3"
 ```
 
-```json
-{"status": "ok", "identifier": 1612789453, "deleted": true}
-```
-
-## Kafka Integration
-
-When `KAFKA_ENABLED=TRUE`, the server starts a Kafka consumer/producer for async store and monitor operations.
-
-### Topics
-
-| Topic | Direction | Description |
-|---|---|---|
-| `panako-store-requests` | consume | Store audio by URL |
-| `panako-store-results` | produce | Store results |
-| `panako-monitor-requests` | consume | Monitor audio by URL |
-| `panako-monitor-results` | produce | Monitor results |
-
-### Request format
+Response:
 
 ```json
 {
-  "audio_url": "https://example.com/track.mp3",
-  "filename": "ISRC.mp3",
-  "request_id": "optional-correlation-id"
-}
-```
-
-### Response format
-
-Same as HTTP API responses, with an additional `request_id` field for correlation.
-
-```json
-{
-  "request_id": "req-001",
   "status": "ok",
   "identifier": 1612789453,
-  "isrc": "USRC17607839",
-  ...
+  "deleted": true
 }
-```
-
-### Example
-
-```bash
-# Send store request
-echo '{"audio_url": "https://example.com/ISRC.mp3", "filename": "ISRC.mp3", "request_id": "req-001"}' | \
-  docker exec -i ozen-kafka kafka-console-producer.sh --bootstrap-server localhost:9092 --topic panako-store-requests
-
-# Read results
-docker exec ozen-kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic panako-store-results --from-beginning
-
-# Send monitor request
-echo '{"audio_url": "https://example.com/radio.mp3", "request_id": "mon-001"}' | \
-  docker exec -i ozen-kafka kafka-console-producer.sh --bootstrap-server localhost:9092 --topic panako-monitor-requests
-
-# Read monitor results
-docker exec ozen-kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic panako-monitor-results --from-beginning
 ```
 
 ## Configuration
 
-All parameters can be set via environment variables (Docker), CLI arguments (`KEY=VALUE`), or `~/.panako/config.properties`. Priority: CLI args > env vars > config file > defaults.
+All parameters can be set via CLI arguments (`KEY=VALUE`), system properties (`-DKEY=VALUE`), environment variables, or `~/.panako/config.properties`.
 
 ### Server
 
 | Parameter | Default | Description |
 |---|---|---|
+| `API_KEY` | _(empty)_ | API key for authentication. If empty, auth is disabled |
 | `SERVER_PORT` | 8080 | HTTP server port |
 | `SERVER_MAX_UPLOAD_SIZE_MB` | 100 | Maximum upload file size in MB |
 | `SERVER_THREAD_POOL_SIZE` | 10 | HTTP handler thread pool size |
 | `STRATEGY` | OLAF | Fingerprinting algorithm (`OLAF` or `PANAKO`) |
 
-### Storage
-
-| Parameter | Default | Description |
-|---|---|---|
-| `OLAF_STORAGE` | LMDB | OLAF storage backend (`LMDB`, `CLICKHOUSE`, `MEM`) |
-| `OLAF_CLICKHOUSE_URL` | `jdbc:ch://localhost:8123/default` | ClickHouse JDBC URL for OLAF |
-| `PANAKO_STORAGE` | LMDB | PANAKO storage backend (`LMDB`, `CLICKHOUSE`, `MEM`) |
-| `PANAKO_CLICKHOUSE_URL` | `jdbc:ch://localhost:8123/default` | ClickHouse JDBC URL for PANAKO |
-
 ### Query filtering
 
 | Parameter | Default | Description |
 |---|---|---|
-| `MATCH_MIN_SCORE` | 20 | Minimum score to accept a query match |
-| `MATCH_MIN_PERCENTAGE` | 0.5 | Minimum match percentage (0.0-1.0) for query |
+| `MATCH_MIN_SCORE` | 20 | Minimum score (fingerprint hits) to accept a query match |
+| `MATCH_MIN_PERCENTAGE` | 0.5 | Minimum match percentage (0.0-1.0) for query results |
 
 ### Monitor
 
 | Parameter | Default | Description |
 |---|---|---|
 | `MONITOR_STEP_SIZE` | 30 | Window size in seconds |
-| `MONITOR_OVERLAP` | 10 | Window overlap in seconds |
-| `MONITOR_MIN_SCORE` | 20 | Minimum total score for monitor match |
-| `MONITOR_MIN_PERCENTAGE` | 0.5 | Minimum match percentage for monitor |
-| `MONITOR_REFINE_THRESHOLD` | 2.0 | Gap (seconds) to trigger boundary refinement |
-| `MONITOR_REFINE_CHUNK_SIZE` | 30 | Chunk size for refinement queries |
+| `MONITOR_OVERLAP` | 10 | Window overlap in seconds (step = STEP_SIZE - OVERLAP) |
+| `MONITOR_MIN_SCORE` | 20 | Minimum total score to accept a monitor match |
+| `MONITOR_MIN_PERCENTAGE` | 0.5 | Minimum match percentage (0.0-1.0) for monitor results |
+| `MONITOR_REFINE_THRESHOLD` | 5.0 | Gap in seconds to trigger boundary refinement |
+| `MONITOR_REFINE_CHUNK_SIZE` | 30 | Chunk size in seconds for refinement queries |
 
-### Kafka
+Example — stricter filtering and larger monitor windows:
 
-| Parameter | Default | Description |
-|---|---|---|
-| `KAFKA_ENABLED` | FALSE | Enable Kafka consumer/producer |
-| `KAFKA_BOOTSTRAP_SERVERS` | localhost:9092 | Kafka bootstrap servers |
-| `KAFKA_GROUP_ID` | panako | Consumer group ID |
-| `KAFKA_STORE_REQUEST_TOPIC` | panako-store-requests | Topic for store requests |
-| `KAFKA_STORE_RESULT_TOPIC` | panako-store-results | Topic for store results |
-| `KAFKA_MONITOR_REQUEST_TOPIC` | panako-monitor-requests | Topic for monitor requests |
-| `KAFKA_MONITOR_RESULT_TOPIC` | panako-monitor-results | Topic for monitor results |
-
-## Architecture
-
-### Strategy comparison
-
-| | OLAF | PANAKO |
-|---|---|---|
-| Algorithm | Spectral peaks (Shazam-like) | Gabor transform + pitch-invariant |
-| BPM/speed change tolerance | No | Up to +/-20% |
-| Pitch shift tolerance | No | Up to +/-20% |
-| Store speed | Fast (~2-3s/track) | Slower (~8-15s/track) |
-| Query speed | <1s | 2-5s |
-| Recommended for | Exact match, speed-critical | Radio monitoring, BPM variations |
-
-### Storage comparison
-
-| | LMDB | ClickHouse |
-|---|---|---|
-| Max tracks (single server) | ~40K-650K (RAM dependent) | ~5-10M |
-| 30M tracks | Not possible | Yes (sharding) |
-| Disk size (30M tracks) | 8-12 TB | 2-3 TB (compressed) |
-| RAM requirement | = DB size | 10-20% of DB |
-| Concurrent writes | Single writer (lock) | Multiple writers |
-| Setup | Zero (embedded) | Separate server |
+```bash
+java --add-opens=java.base/java.nio=ALL-UNNAMED \
+  -cp build/libs/panako-2.1-all.jar \
+  be.panako.http.PanakoHttpServer \
+  MATCH_MIN_SCORE=50 \
+  MONITOR_MIN_PERCENTAGE=0.7 \
+  MONITOR_STEP_SIZE=30 \
+  MONITOR_OVERLAP=10
+```
 
 ## Identifier Logic
 
@@ -423,6 +450,12 @@ The `identifier` is a stable numeric key derived from the filename (without exte
 - `USRC17607839.aac` -> same ID
 - `1855.mp3` -> `1855` (numeric filenames used directly)
 
+This ensures the same ISRC always maps to the same identifier, enabling duplicate detection and consistent query results.
+
+## Concurrency
+
+LMDB allows concurrent reads but only a single writer. Store and delete operations are serialized with a lock. Query and stats requests run concurrently without blocking.
+
 ## JVM Flag
 
-`--add-opens=java.base/java.nio=ALL-UNNAMED` is required for LMDB. Included in the Dockerfile `ENTRYPOINT`.
+`--add-opens=java.base/java.nio=ALL-UNNAMED` is required for LMDB to function. It is already included in the Dockerfile `ENTRYPOINT`.

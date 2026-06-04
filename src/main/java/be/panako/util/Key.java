@@ -54,15 +54,24 @@ public enum Key{
 	MAX_FILE_SIZE(6000),
 	
 	/**
-	 * The step size while monitoring a long audio fragment, in seconds.
+	 * The step size while monitoring a long audio fragment, in seconds (pass 1).
 	 */
 	MONITOR_STEP_SIZE(30),
 
 	/**
-	 * The overlap, also in seconds. By default detection resolution is 
-	 * 25-5=20 seconds.
+	 * The overlap, also in seconds (pass 1).
 	 */
 	MONITOR_OVERLAP(10),
+
+	/**
+	 * Step size for the second (fine) pass on unmatched gaps.
+	 */
+	MONITOR_STEP_SIZE_FINE(15),
+
+	/**
+	 * Overlap for the second (fine) pass on unmatched gaps.
+	 */
+	MONITOR_OVERLAP_FINE(5),
 	
 	/**
 	 * Enabling the ffmpeg pipe allows support for almost all audio formats in the
@@ -480,9 +489,19 @@ public enum Key{
 
 	/**
 	 * Number of parallel threads for processing monitor windows.
-	 * Higher values speed up long audio monitoring at the cost of CPU/memory.
 	 */
 	MONITOR_PARALLEL_WINDOWS(4),
+
+	/**
+	 * Maximum gap (seconds) between consecutive detection windows of the same
+	 * track before they are split into separate clusters in the monitor response.
+	 *
+	 * <p>The effective threshold is {@code min(this value, trackDuration * 0.5)}
+	 * when reference track duration is known — a track shorter than 60 seconds
+	 * cannot legitimately have two occurrences separated by more than half its
+	 * length without intermediate detections.</p>
+	 */
+	MONITOR_WINDOW_GAP_THRESHOLD(30.0),
 
 	/**
 	 * ClickHouse JDBC URL for OLAF storage.
@@ -527,17 +546,32 @@ public enum Key{
 	/**
 	 * Topic to consume monitor requests from.
 	 */
-	KAFKA_MONITOR_REQUEST_TOPIC("panako-monitor-requests"),
+	KAFKA_REQUEST_TOPIC("panako.monitor.request"),
 
 	/**
 	 * Topic to produce monitor results to.
 	 */
-	KAFKA_MONITOR_RESULT_TOPIC("panako-monitor-results"),
+	KAFKA_RESPONSE_TOPIC("panako.monitor.response"),
+
+	/**
+	 * Kafka worker mode: ALL (store+monitor), STORE, MONITOR.
+	 */
+	KAFKA_MODE("ALL"),
 
 	/**
 	 * Number of parallel Kafka worker threads.
 	 */
-	KAFKA_WORKER_THREADS(1);
+	KAFKA_WORKER_THREADS(1),
+
+
+	///////////////////Security config
+
+	/**
+	 * API key for authenticating HTTP requests.
+	 * If empty, no authentication is required.
+	 * Set via API_KEY environment variable or config.
+	 */
+	API_KEY("");
 
 
     String defaultValue;

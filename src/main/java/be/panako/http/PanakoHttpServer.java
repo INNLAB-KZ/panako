@@ -82,17 +82,17 @@ public class PanakoHttpServer {
 		this.server = HttpServer.create(new InetSocketAddress(port), 0);
 		this.server.setExecutor(executor);
 
-		// Register endpoints
+		// Register endpoints (health is public, everything else requires API key)
 		server.createContext("/api/v1/health", new HealthHandler());
-		server.createContext("/api/v1/stats", new StatsHandler(strategy));
-		server.createContext("/api/v1/store/fingerprints", new StoreFingerprintsHandler(writeLock));
-		server.createContext("/api/v1/store/url", new StoreUrlHandler(strategy, writeLock, maxUploadSizeMB));
-		server.createContext("/api/v1/store", new StoreHandler(strategy, writeLock, maxUploadSizeMB));
-		server.createContext("/api/v1/query/fingerprints", new QueryFingerprintsHandler());
-		server.createContext("/api/v1/query", new QueryHandler(strategy, maxUploadSizeMB));
-		server.createContext("/api/v1/monitor/url", new MonitorUrlHandler(strategy, maxUploadSizeMB));
-		server.createContext("/api/v1/monitor", new MonitorHandler(strategy, maxUploadSizeMB));
-		server.createContext("/api/v1/delete", new DeleteHandler(strategy, writeLock, maxUploadSizeMB));
+		server.createContext("/api/v1/stats", new ApiKeyFilter(new StatsHandler(strategy)));
+		server.createContext("/api/v1/store/fingerprints", new ApiKeyFilter(new StoreFingerprintsHandler(writeLock)));
+		server.createContext("/api/v1/store/url", new ApiKeyFilter(new StoreUrlHandler(strategy, writeLock, maxUploadSizeMB)));
+		server.createContext("/api/v1/store", new ApiKeyFilter(new StoreHandler(strategy, writeLock, maxUploadSizeMB)));
+		server.createContext("/api/v1/query/fingerprints", new ApiKeyFilter(new QueryFingerprintsHandler()));
+		server.createContext("/api/v1/query", new ApiKeyFilter(new QueryHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/monitor/url", new ApiKeyFilter(new MonitorUrlHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/monitor", new ApiKeyFilter(new MonitorHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/delete", new ApiKeyFilter(new DeleteHandler(strategy, writeLock, maxUploadSizeMB)));
 
 		LOG.info(String.format("Panako HTTP server configured on port %d with %d threads", port, threadPoolSize));
 	}
@@ -214,18 +214,30 @@ public class PanakoHttpServer {
 		try {
 			PanakoHttpServer server = new PanakoHttpServer(port, threadPoolSize, maxUploadSizeMB);
 
-			// Start Kafka workers if enabled
+			// Start Kafka workers if enabled.
+			// PANAKO_WORKER_MODE:
+			//   stage1 (default) — N workers on stage1 topics
+			//   refine           — N workers on refine topics
+			//   both             — N stage1 workers + N refine workers in the same JVM
+			//                      (each pool uses its own consumer group → no contention)
 			if (Config.getBoolean(Key.KAFKA_ENABLED)) {
 				int workerCount = Config.getInt(Key.KAFKA_WORKER_THREADS);
-				for (int i = 0; i < workerCount; i++) {
-					PanakoKafkaWorker kafkaWorker = new PanakoKafkaWorker(
-							Strategy.getInstance(), server.writeLock, maxUploadSizeMB);
-					Thread kafkaThread = new Thread(kafkaWorker, "panako-kafka-worker-" + i);
-					kafkaThread.setDaemon(true);
-					kafkaThread.start();
+				String workerMode = PanakoKafkaWorker.resolveWorkerMode();
+				String[] pools = workerMode.equals(PanakoKafkaWorker.MODE_BOTH)
+						? new String[] { PanakoKafkaWorker.MODE_STAGE1, PanakoKafkaWorker.MODE_REFINE }
+						: new String[] { workerMode };
+				for (String pool : pools) {
+					for (int i = 0; i < workerCount; i++) {
+						PanakoKafkaWorker kafkaWorker = new PanakoKafkaWorker(
+								Strategy.getInstance(), server.writeLock, maxUploadSizeMB, pool);
+						Thread kafkaThread = new Thread(kafkaWorker, "panako-kafka-worker-" + pool + "-" + i);
+						kafkaThread.setDaemon(true);
+						kafkaThread.start();
+					}
 				}
-				System.out.printf("  Kafka: %d workers started (bootstrap: %s)%n",
-						workerCount, Config.get(Key.KAFKA_BOOTSTRAP_SERVERS));
+				System.out.printf("  Kafka: worker_mode=%s, %d worker(s) per pool, pools=%s (bootstrap: %s)%n",
+						workerMode, workerCount, java.util.Arrays.toString(pools),
+						Config.get(Key.KAFKA_BOOTSTRAP_SERVERS));
 			}
 
 			server.start();

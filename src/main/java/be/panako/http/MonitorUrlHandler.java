@@ -81,6 +81,13 @@ public class MonitorUrlHandler implements HttpHandler {
 				java.util.List<be.panako.strategy.QueryResult> allResults =
 						MonitorHandler.monitorWithAbsoluteTimes(strategy, filePath);
 
+				// Filter by ISRCs if specified
+				String isrcsJson = extractJsonString(body, "isrcs");
+				if (isrcsJson != null && !isrcsJson.isEmpty()) {
+					java.util.Set<String> filterIsrcs = MonitorHandler.parseIsrcsParam(isrcsJson);
+					allResults = MonitorHandler.filterByIsrcs(allResults, filterIsrcs);
+				}
+
 				long processingTimeMs = System.currentTimeMillis() - startTime;
 
 				String json = MonitorHandler.buildResponseJson(strategy, allResults, filePath, processingTimeMs);

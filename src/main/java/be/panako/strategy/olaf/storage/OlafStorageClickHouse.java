@@ -37,7 +37,7 @@ public class OlafStorageClickHouse implements OlafStorage {
 
 	private final String jdbcUrl;
 	private final List<long[]> storeQueue = new ArrayList<>();
-	private final List<Long> queryQueue = new ArrayList<>();
+	private final ThreadLocal<List<Long>> queryQueue = ThreadLocal.withInitial(ArrayList::new);
 	private final List<long[]> deleteQueue = new ArrayList<>();
 
 	private OlafStorageClickHouse() {
@@ -134,18 +134,19 @@ public class OlafStorageClickHouse implements OlafStorage {
 
 	@Override
 	public void addToQueryQueue(long queryHash) {
-		queryQueue.add(queryHash);
+		queryQueue.get().add(queryHash);
 	}
 
 	@Override
 	public void processQueryQueue(Map<Long, List<OlafHit>> matchAccumulator, int range, Set<Integer> resourcesToAvoid) {
-		if (queryQueue.isEmpty()) return;
+		List<Long> queue = queryQueue.get();
+		if (queue.isEmpty()) return;
 
 		try (Connection conn = getConnection()) {
 			// Build IN clause with hash range expansion
 			Set<Long> expandedHashes = new HashSet<>();
 			Map<Long, Long> nearToOriginal = new HashMap<>();
-			for (long queryHash : queryQueue) {
+			for (long queryHash : queue) {
 				for (int delta = -range; delta <= range; delta++) {
 					long nearHash = queryHash + delta;
 					expandedHashes.add(nearHash);
@@ -187,7 +188,7 @@ public class OlafStorageClickHouse implements OlafStorage {
 		} catch (SQLException e) {
 			LOG.log(Level.SEVERE, "Failed to process query queue", e);
 		} finally {
-			queryQueue.clear();
+			queue.clear();
 		}
 	}
 

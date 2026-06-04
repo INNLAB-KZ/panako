@@ -1,9 +1,10 @@
-# Build stage
-FROM eclipse-temurin:17-jdk-jammy AS builder
+# Build stage — use the official Gradle image so we don't pay the
+# gradle-wrapper download (often times out from services.gradle.org).
+FROM gradle:8.12-jdk17-jammy AS builder
 
 WORKDIR /build
-COPY . .
-RUN chmod +x gradlew && ./gradlew shadowJar --no-daemon
+COPY --chown=gradle:gradle . .
+RUN gradle shadowJar --no-daemon
 
 # Runtime stage
 FROM eclipse-temurin:17-jre-jammy
@@ -23,6 +24,7 @@ CMD ["SERVER_PORT=8080"]
 
 # Multi-platform (amd64 + arm64):
 #   docker buildx build --platform linux/amd64,linux/arm64 -t innlabkz/ozen-panako:latest --push .
+#   docker buildx build --platform linux/amd64 -t innlabkz/ozen-panako:latest --push .
 
 # docker build -t innlabkz/ozen-panako:latest .
 # docker push innlabkz/ozen-panako:latest
