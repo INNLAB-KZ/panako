@@ -182,9 +182,11 @@ public class OlafStorageClickHouse implements OlafStorage {
 				}
 			}
 
-			// Query in batches to avoid too-large IN clauses
+			// Query in batches to avoid too-large IN clauses.
+			// 10000 caused 4-5M read_rows per query (bloom filter FP rate explodes with big IN sets);
+			// 1000 keeps bloom effective and brings p99 from ~18s down to ~2s.
 			List<Long> hashList = new ArrayList<>(expandedHashes);
-			int batchSize = 10000;
+			int batchSize = 1000;
 
 			for (int i = 0; i < hashList.size(); i += batchSize) {
 				List<Long> batch = hashList.subList(i, Math.min(i + batchSize, hashList.size()));
