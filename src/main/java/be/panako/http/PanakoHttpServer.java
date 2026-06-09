@@ -240,6 +240,32 @@ public class PanakoHttpServer {
 						Config.get(Key.KAFKA_BOOTSTRAP_SERVERS));
 			}
 
+			// Start Redis Stream workers if enabled (env REDIS_ENABLED=true).
+			// Runs in parallel to Kafka workers — each backend is an independent queue.
+			// PANAKO_WORKER_MODE controls which streams the workers subscribe to (same semantics as Kafka).
+			String redisEnabled = System.getProperty("REDIS_ENABLED");
+			if (redisEnabled == null) redisEnabled = System.getenv("REDIS_ENABLED");
+			if (redisEnabled != null && redisEnabled.equalsIgnoreCase("true")) {
+				int redisWorkerCount = getIntConfig("REDIS_WORKER_THREADS", 1);
+				String workerMode = PanakoKafkaWorker.resolveWorkerMode();
+				String[] pools = workerMode.equals(PanakoKafkaWorker.MODE_BOTH)
+						? new String[] { PanakoRedisStreamWorker.MODE_STAGE1, PanakoRedisStreamWorker.MODE_REFINE }
+						: new String[] { workerMode };
+				for (String pool : pools) {
+					for (int i = 0; i < redisWorkerCount; i++) {
+						PanakoRedisStreamWorker redisWorker = new PanakoRedisStreamWorker(
+								Strategy.getInstance(), server.writeLock, maxUploadSizeMB, pool);
+						Thread redisThread = new Thread(redisWorker, "panako-redis-worker-" + pool + "-" + i);
+						redisThread.setDaemon(true);
+						redisThread.start();
+					}
+				}
+				String redisHost = System.getenv("REDIS_HOST");
+				if (redisHost == null) redisHost = "127.0.0.1";
+				System.out.printf("  Redis: worker_mode=%s, %d worker(s) per pool, pools=%s (host: %s)%n",
+						workerMode, redisWorkerCount, java.util.Arrays.toString(pools), redisHost);
+			}
+
 			server.start();
 		} catch (IOException e) {
 			LOG.severe("Failed to start HTTP server: " + e.getMessage());

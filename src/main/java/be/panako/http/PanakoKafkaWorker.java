@@ -11,6 +11,12 @@ import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.producer.*;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import redis.clients.jedis.DefaultJedisClientConfig;
+import redis.clients.jedis.HostAndPort;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
+import redis.clients.jedis.params.XAddParams;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -88,6 +94,12 @@ public class PanakoKafkaWorker implements Runnable {
 	private final String monitorRequestTopic;
 	private final String monitorResultTopic;
 	private final String workerMode;
+	/** When true, results are XADDed to Redis Streams (topic name == stream name) instead of
+	 *  produced to Kafka. Used during the Kafka→Redis migration: consumes remaining Kafka
+	 *  backlog but routes responses to Redis so the orchestrator (Redis-only) sees them. */
+	private final boolean resultsToRedis;
+	/** Non-null only when {@link #resultsToRedis} is true. */
+	private final JedisPool redisPool;
 	private volatile boolean running = true;
 
 	/**
@@ -95,6 +107,13 @@ public class PanakoKafkaWorker implements Runnable {
 	 * Returns a lowercased, validated mode — defaults to {@link #MODE_STAGE1}.
 	 * Possible values: {@link #MODE_STAGE1}, {@link #MODE_REFINE}, {@link #MODE_BOTH}.
 	 */
+	private static String getEnvOrDefault(String name, String defaultValue) {
+		String val = System.getProperty(name);
+		if (val == null) val = System.getenv(name);
+		if (val == null || val.trim().isEmpty()) return defaultValue;
+		return val.trim();
+	}
+
 	static String resolveWorkerMode() {
 		String raw = System.getProperty("PANAKO_WORKER_MODE");
 		if (raw == null) raw = System.getenv("PANAKO_WORKER_MODE");
@@ -172,10 +191,15 @@ public class PanakoKafkaWorker implements Runnable {
 		consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 		consumerProps.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "1");
-		consumerProps.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "1800000"); // 30 minutes
-		consumerProps.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "30000");
+		consumerProps.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG,
+				getEnvOrDefault("KAFKA_MAX_POLL_INTERVAL_MS", "1800000")); // 30 minutes
+		consumerProps.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG,
+				getEnvOrDefault("KAFKA_SESSION_TIMEOUT_MS", "120000")); // 2 minutes — tolerate long monitor tasks + GC pauses
+		consumerProps.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG,
+				getEnvOrDefault("KAFKA_HEARTBEAT_INTERVAL_MS", "20000")); // 20s — must be < session.timeout/3
 		consumerProps.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
-				"org.apache.kafka.clients.consumer.CooperativeStickyAssignor");
+				getEnvOrDefault("KAFKA_PARTITION_ASSIGNMENT_STRATEGY",
+						"org.apache.kafka.clients.consumer.CooperativeStickyAssignor"));
 		this.consumer = new KafkaConsumer<>(consumerProps);
 
 		// Producer config
@@ -184,6 +208,37 @@ public class PanakoKafkaWorker implements Runnable {
 		producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
 		producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
 		this.producer = new KafkaProducer<>(producerProps);
+
+		// Optional output redirect to Redis Streams — used during Kafka→Redis migration to
+		// drain the remaining Kafka backlog while routing all responses to Redis (so the
+		// orchestrator, which now only reads Redis, still receives them).
+		this.resultsToRedis = Boolean.parseBoolean(getEnvOrDefault("KAFKA_RESULTS_TO_REDIS", "false"));
+		if (this.resultsToRedis) {
+			String redisHost = getEnvOrDefault("REDIS_HOST", "127.0.0.1");
+			int redisPort = Integer.parseInt(getEnvOrDefault("REDIS_PORT", "6379"));
+			String redisPassword = getEnvOrDefault("REDIS_PASSWORD", "");
+			int redisPoolSize = Integer.parseInt(getEnvOrDefault("REDIS_POOL_SIZE", "4"));
+			int redisTimeoutMs = Integer.parseInt(getEnvOrDefault("REDIS_TIMEOUT_MS", "10000"));
+
+			JedisPoolConfig poolConfig = new JedisPoolConfig();
+			poolConfig.setMaxTotal(redisPoolSize);
+			poolConfig.setMaxIdle(redisPoolSize);
+			poolConfig.setMinIdle(1);
+			poolConfig.setTestOnBorrow(false);
+			poolConfig.setTestWhileIdle(true);
+
+			DefaultJedisClientConfig.Builder clientCfg = DefaultJedisClientConfig.builder()
+					.connectionTimeoutMillis(redisTimeoutMs)
+					.socketTimeoutMillis(redisTimeoutMs);
+			if (!redisPassword.isEmpty()) {
+				clientCfg.password(redisPassword);
+			}
+			this.redisPool = new JedisPool(poolConfig, new HostAndPort(redisHost, redisPort), clientCfg.build());
+			LOG.info("Kafka worker: KAFKA_RESULTS_TO_REDIS=true — results will be XADDed to Redis at "
+					+ redisHost + ":" + redisPort + " (stream name == topic name)");
+		} else {
+			this.redisPool = null;
+		}
 	}
 
 	public void stop() {
@@ -245,6 +300,9 @@ public class PanakoKafkaWorker implements Runnable {
 		} finally {
 			try { consumer.close(); } catch (Exception ignored) {}
 			try { producer.close(); } catch (Exception ignored) {}
+			if (redisPool != null) {
+				try { redisPool.close(); } catch (Exception ignored) {}
+			}
 			LOG.info("Kafka worker stopped");
 		}
 	}
@@ -532,6 +590,24 @@ public class PanakoKafkaWorker implements Runnable {
 	}
 
 	private void send(String topic, String key, String value) {
+		if (resultsToRedis && redisPool != null) {
+			// Migration mode: response stream name in Redis matches the Kafka topic name.
+			try (Jedis jedis = redisPool.getResource()) {
+				Map<String, String> fields = new HashMap<>();
+				fields.put("key", key != null ? key : "");
+				fields.put("value", value);
+				jedis.xadd(topic, XAddParams.xAddParams().maxLen(100000).approximateTrimming(), fields);
+			} catch (Exception e) {
+				LOG.log(Level.SEVERE, "Failed to XADD result to Redis stream " + topic
+						+ " — falling back to Kafka producer", e);
+				producer.send(new ProducerRecord<>(topic, key, value), (metadata, exception) -> {
+					if (exception != null) {
+						LOG.log(Level.SEVERE, "Kafka fallback also failed for " + topic, exception);
+					}
+				});
+			}
+			return;
+		}
 		producer.send(new ProducerRecord<>(topic, key, value), (metadata, exception) -> {
 			if (exception != null) {
 				LOG.log(Level.SEVERE, "Failed to send Kafka message to " + topic, exception);

@@ -1,0 +1,20 @@
+services:
+  # Kafka store worker — bulk import, no public HTTP
+  # Host: 4 vCPU / 8 GB RAM, 2 replicas × 2 threads = 4 consumers
+  panako-store:
+    image: innlabkz/ozen-panako:latest
+    environment:
+      - JAVA_OPTS=-Xmx3g
+      - STRATEGY=OLAF
+      - OLAF_STORAGE=CLICKHOUSE
+      - OLAF_CLICKHOUSE_URL=jdbc:ch://${CLICKHOUSE_HOST}:8123/default?user=${CLICKHOUSE_USER}&password=${CLICKHOUSE_PASSWORD}
+      - OLAF_CACHE_TO_FILE=FALSE
+      - OLAF_USE_CACHED_PRINTS=FALSE
+      - SERVER_PORT=8081
+      - KAFKA_ENABLED=TRUE
+      - KAFKA_MODE=STORE
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}
+      - KAFKA_WORKER_THREADS=${KAFKA_WORKER_THREADS:-2}
+    deploy:
+      replicas: 2
+    restart: unless-stopped

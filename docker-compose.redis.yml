@@ -1,0 +1,50 @@
+services:
+  redis:
+    image: redis:8-alpine
+    container_name: redis
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - redis-server
+      - --bind
+      - 0.0.0.0
+      - --port
+      - "6379"
+      - --requirepass
+      - "${REDIS_PASSWORD}"
+      - --maxmemory
+      - "6gb"
+      - --maxmemory-policy
+      - "noeviction"
+      - --save
+      - "300 100"
+      - --save
+      - "60 10000"
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - "everysec"
+      - --auto-aof-rewrite-percentage
+      - "100"
+      - --auto-aof-rewrite-min-size
+      - "64mb"
+      - --tcp-keepalive
+      - "60"
+      - --timeout
+      - "0"
+      - --io-threads
+      - "4"
+      - --io-threads-do-reads
+      - "yes"
+    volumes:
+      - ./data:/data
+    ulimits:
+      nofile: {soft: 65535, hard: 65535}
+    mem_limit: 7g
+    mem_reservation: 4g
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "PING"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

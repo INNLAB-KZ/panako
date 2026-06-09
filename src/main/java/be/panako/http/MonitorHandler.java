@@ -41,6 +41,13 @@ public class MonitorHandler implements HttpHandler {
 	private static final Semaphore monitorSemaphore =
 			new Semaphore(Config.getInt(Key.MONITOR_MAX_CONCURRENT));
 
+	private static int parseIntEnv(String name, int defaultValue) {
+		String val = System.getProperty(name);
+		if (val == null) val = System.getenv(name);
+		if (val == null || val.trim().isEmpty()) return defaultValue;
+		try { return Integer.parseInt(val.trim()); } catch (NumberFormatException e) { return defaultValue; }
+	}
+
 	static boolean tryAcquireMonitorSlot() {
 		return monitorSemaphore.tryAcquire();
 	}
@@ -156,6 +163,14 @@ public class MonitorHandler implements HttpHandler {
 		List<double[]> gaps = pass1Results.isEmpty()
 				? Collections.emptyList()
 				: findGaps(pass1Results, totalDuration, stepSize);
+		// Filter gaps: only scan promising unrecognized segments (configurable bounds).
+		// Skip too-small gaps (no time for ≥6 hash hits) and too-large gaps (likely talk/silence).
+		int gapMinSec = parseIntEnv("MONITOR_GAP_MIN_SECONDS", 60);
+		int gapMaxSec = parseIntEnv("MONITOR_GAP_MAX_SECONDS", 300);
+		gaps.removeIf(g -> {
+			double dur = g[1] - g[0];
+			return dur < gapMinSec || dur > gapMaxSec;
+		});
 		if (gaps.isEmpty()) {
 			return pass1Results;
 		}
