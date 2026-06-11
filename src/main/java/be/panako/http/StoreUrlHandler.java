@@ -1,5 +1,7 @@
 package be.panako.http;
 
+import be.panako.strategy.QueryResult;
+import be.panako.strategy.QueryResultHandler;
 import be.panako.strategy.Strategy;
 import be.panako.strategy.olaf.storage.OlafStorageClickHouse;
 import be.panako.strategy.panako.storage.PanakoStorageClickHouse;
@@ -18,6 +20,9 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -38,6 +43,10 @@ public class StoreUrlHandler implements HttpHandler {
 	private final Strategy strategy;
 	private final ReentrantLock writeLock;
 	private final long maxBytes;
+	private final MatchValidator validator = new MatchValidator();
+
+	/** match_percentage threshold above which the upload is treated as a duplicate of an already-indexed track. */
+	private static final double CONTENT_DUP_MATCH_PERCENTAGE = 99.0;
 
 	public StoreUrlHandler(Strategy strategy, ReentrantLock writeLock, int maxUploadSizeMB) {
 		this.strategy = strategy;
@@ -90,6 +99,22 @@ public class StoreUrlHandler implements HttpHandler {
 			int identifier = FileUtils.getIdentifier(filePath);
 			String isrc = HttpUtil.extractIsrc(filename);
 
+			// Skip indexing when the downloaded audio is empty.
+			if (Files.size(audioFile) == 0) {
+				LOG.warning("Empty audio (0 bytes) from " + audioUrl + " — skipping indexing");
+				StringBuilder json = new StringBuilder();
+				json.append("{");
+				json.append("\"status\":\"skipped_empty\",");
+				json.append("\"identifier\":").append(identifier).append(",");
+				json.append("\"isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\",");
+				json.append("\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\",");
+				json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title)).append(",");
+				json.append("\"audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\"");
+				json.append("}");
+				HttpUtil.sendJson(exchange, 200, json.toString());
+				return;
+			}
+
 			// Check for duplicates — verify integrity of existing data
 			if (strategy.hasResource(filePath)) {
 				double[] meta = HttpUtil.parseMetadata(strategy.metadata(filePath));
@@ -115,6 +140,33 @@ public class StoreUrlHandler implements HttpHandler {
 				} finally {
 					writeLock.unlock();
 				}
+			}
+
+			// Content-based duplicate check: same audio already indexed under a different
+			// path/ISRC. Query the index and short-circuit when a validated match reports
+			// at least CONTENT_DUP_MATCH_PERCENTAGE of seconds covered.
+			QueryResult contentDup = findContentDuplicate(filePath);
+			if (contentDup != null) {
+				LOG.info("Content duplicate for " + filename
+						+ " — matches refId=" + contentDup.refIdentifier
+						+ " at " + String.format("%.1f", contentDup.percentOfSecondsWithMatches) + "%");
+				String matchedIsrc = HttpUtil.extractIsrc(contentDup.refPath);
+				String[] extras = QueryHandler.lookupExtras(contentDup.refIdentifier);
+				StringBuilder json = new StringBuilder();
+				json.append("{");
+				json.append("\"status\":\"already_indexed_match\",");
+				json.append("\"identifier\":").append(contentDup.refIdentifier).append(",");
+				json.append("\"isrc\":\"").append(HttpUtil.escapeJson(matchedIsrc)).append("\",");
+				json.append("\"filename\":\"").append(HttpUtil.escapeJson(contentDup.refPath)).append("\",");
+				json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(extras[0])).append(",");
+				json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(extras[1])).append(",");
+				json.append("\"match_percentage\":").append(String.format("%.1f", contentDup.percentOfSecondsWithMatches)).append(",");
+				json.append("\"submitted_filename\":\"").append(HttpUtil.escapeJson(filename)).append("\",");
+				json.append("\"submitted_audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\",");
+				json.append("\"submitted_isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\"");
+				json.append("}");
+				HttpUtil.sendJson(exchange, 200, json.toString());
+				return;
 			}
 
 			long startTime = System.currentTimeMillis();
@@ -171,6 +223,33 @@ public class StoreUrlHandler implements HttpHandler {
 	 * <p>No-op when ClickHouse is not the active storage backend, or when both
 	 * extras are {@code null} / empty.</p>
 	 */
+	/**
+	 * Run a fingerprint query against the existing index. Return the first validated
+	 * match whose {@code percentOfSecondsWithMatches} is at least
+	 * {@link #CONTENT_DUP_MATCH_PERCENTAGE}, or {@code null} when no such match
+	 * exists.
+	 */
+	private QueryResult findContentDuplicate(String filePath) {
+		int maxResults = Config.getInt(Key.NUMBER_OF_QUERY_RESULTS);
+		List<QueryResult> results = new ArrayList<>();
+		strategy.query(filePath, maxResults, new HashSet<>(), new QueryResultHandler() {
+			@Override public void handleQueryResult(QueryResult r) { results.add(r); }
+			@Override public void handleEmptyResult(QueryResult r) { }
+		});
+		if (results.isEmpty()) return null;
+		double queryDuration = results.get(0).queryStop > 0 ? results.get(0).queryStop : 0;
+		for (QueryResult r : results) {
+			if (!validator.validateQuality(r)) continue;
+			if (!validator.validate(r, queryDuration)) continue;
+			double refDuration = r.refStop > 0 ? r.refStop : 0;
+			if (!validator.validateDuration(r, queryDuration, refDuration)) continue;
+			if (r.percentOfSecondsWithMatches >= CONTENT_DUP_MATCH_PERCENTAGE) {
+				return r;
+			}
+		}
+		return null;
+	}
+
 	private static void persistExtras(int identifier, String filename, float duration,
 									  int fingerprintCount, String title, String audioUrl) {
 		boolean titlePresent = title != null && !title.isEmpty();

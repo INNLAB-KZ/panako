@@ -140,7 +140,7 @@ public class QueryHandler implements HttpHandler {
 	 * two-element array {@code [title, audioUrl]}; either element may be
 	 * {@code null} when the value is absent or the backend is not ClickHouse.
 	 */
-	private static String[] lookupExtras(String refIdentifier) {
+	static String[] lookupExtras(String refIdentifier) {
 		String[] empty = new String[]{null, null};
 		if (refIdentifier == null) return empty;
 		int idInt;

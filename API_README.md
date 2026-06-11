@@ -149,7 +149,7 @@ Response:
 }
 ```
 
-If the same ISRC is already stored (duplicate):
+If the same filename/ISRC is already stored (hash duplicate):
 
 ```json
 {
@@ -161,6 +161,39 @@ If the same ISRC is already stored (duplicate):
   "fingerprints_count": 1250
 }
 ```
+
+If the uploaded audio is the same content as an already-indexed track under a different filename/ISRC (content duplicate, ≥99% fingerprint match), the upload is **not** indexed and the canonical match is returned:
+
+```json
+{
+  "status": "already_indexed_match",
+  "identifier": 1612789453,
+  "isrc": "USRC17607839",
+  "filename": "USRC17607839.mp3",
+  "title": "Artist:Track",
+  "audio_url": "https://example.com/USRC17607839.mp3",
+  "match_percentage": 99.8,
+  "submitted_filename": "QZHN82412345.mp3",
+  "submitted_isrc": "QZHN82412345"
+}
+```
+
+`identifier`/`isrc`/`filename`/`title`/`audio_url` describe the canonical already-indexed track. `submitted_*` fields echo what the caller uploaded. The store endpoint never indexes the upload in this case — clients should use the canonical `identifier` going forward.
+
+If the uploaded file is 0 bytes, no indexing happens:
+
+```json
+{
+  "status": "skipped_empty",
+  "identifier": 1612789453,
+  "isrc": "USRC17607839",
+  "filename": "USRC17607839.mp3",
+  "title": null,
+  "audio_url": null
+}
+```
+
+All status responses (`ok`, `already_exists`, `already_indexed_match`, `skipped_empty`) are HTTP **200 OK**. Only `400`/`500` indicate real errors.
 
 ### `POST /api/v1/store/url`
 
@@ -190,7 +223,53 @@ Response:
 }
 ```
 
-Duplicate check works the same as `POST /api/v1/store` (returns `already_exists` with `duration_seconds` and `fingerprints_count`).
+Both `already_exists` (hash duplicate) and `already_indexed_match` (content duplicate ≥99%) checks work the same as `POST /api/v1/store`. The `already_indexed_match` response on this endpoint additionally includes the original `submitted_audio_url`. A 0-byte download returns `status:"skipped_empty"` without indexing.
+
+### `POST /api/v1/store/rename`
+
+Change the `path` column on an existing `olaf_metadata` / `panako_metadata` row **without re-running fingerprinting**. The underlying fingerprints stay attached to the same `resource_id`; only the descriptive `path` label changes. Useful when the canonical filename of an already-indexed track changes (e.g. a temp upload name like `/tmp/1000067653.mp3` should be relabelled to its real ISRC filename `RUAGT2342680.m4a`).
+
+Accepts `application/json` with one of these shapes:
+
+```bash
+# by identifier (preferred — directly addresses the resource_id)
+curl -X POST http://localhost:8080/api/v1/store/rename \
+  -H "Content-Type: application/json" \
+  -d '{"identifier": 1612789453, "new_path": "RUAGT2342680.m4a"}'
+
+# by old_path (resource_id is recomputed via the same identifier hash function)
+curl -X POST http://localhost:8080/api/v1/store/rename \
+  -H "Content-Type: application/json" \
+  -d '{"old_path": "/tmp/1000067653.mp3", "new_path": "RUAGT2342680.m4a"}'
+```
+
+- `new_path` — required, new value to write into the `path` column
+- `identifier` — Int64 `resource_id` from `olaf_metadata` (preferred when known)
+- `old_path` — string; ignored when `identifier` is supplied. Used as input to `FileUtils.getIdentifier()` to derive the `resource_id`. Must produce the exact same hash that was used at index time.
+
+Response on success (HTTP 200):
+
+```json
+{
+  "status": "ok",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a"
+}
+```
+
+When no metadata row exists for the resolved `resource_id` (HTTP 404):
+
+```json
+{
+  "status": "not_found",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a"
+}
+```
+
+Notes:
+- Only supported on ClickHouse storage. LMDB backends serialize path inside the metadata blob and cannot be patched in place — the endpoint returns `not_found` on LMDB.
+- Implementation: `SELECT FINAL` reads the current `duration`/`num_fingerprints`/`title`/`audio_url` and a new row is inserted with the same `resource_id` plus the new `path`. The `ReplacingMergeTree` engine collapses the duplicate on the next background merge.
 
 ### `POST /api/v1/store/fingerprints`
 
@@ -455,6 +534,83 @@ This ensures the same ISRC always maps to the same identifier, enabling duplicat
 ## Concurrency
 
 LMDB allows concurrent reads but only a single writer. Store and delete operations are serialized with a lock. Query and stats requests run concurrently without blocking.
+
+## Async queue (Redis Streams)
+
+When `REDIS_ENABLED=true`, workers also consume tasks from Redis Streams instead of (or alongside) the synchronous HTTP API. Stream names default to the Kafka topic names so the same orchestrator schema works for both backends.
+
+### Streams
+
+| Request stream | Result stream | Purpose |
+|---|---|---|
+| `panako-store-requests` | `panako-store-results` | Store audio by URL (download + fingerprint + index) |
+| `panako-store-patch` | `panako-store-patch-results` | Patch `olaf_metadata` rows without re-fingerprinting (rename, etc) |
+| `panako.monitor.request` | `panako.monitor.response` | Monitor long audio for multiple matches |
+| `panako.monitor.refine.request` | `panako.monitor.refine.response` | Stage 3 refine (dedicated pool, `PANAKO_WORKER_MODE=refine`) |
+
+Each request is XADDed with `{"key": "<request_id>", "value": "<json>"}`. Responses are XADDed the same way to the matching result stream.
+
+### `panako-store-requests` — store by URL
+
+```json
+{
+  "audio_url": "https://example.com/USRC17607839.mp3",
+  "filename": "USRC17607839.mp3",
+  "title": "Artist:Track",
+  "request_id": "scrape-12345"
+}
+```
+
+Possible response statuses on `panako-store-results` (mirror the HTTP `/store/url` endpoint):
+
+- `ok` — indexed successfully
+- `already_exists` — hash duplicate (same filename was already indexed)
+- `already_indexed_match` — content duplicate (≥99% fingerprint match), upload skipped
+- `skipped_empty` — 0-byte download, upload skipped
+- `error` — see `error` field
+
+### `panako-store-patch` — modify metadata
+
+Patch operations dispatch by the `action` field. Currently the only supported action is `rename` — change the `path` column for an existing row without re-fingerprinting.
+
+```json
+{
+  "action": "rename",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a",
+  "request_id": "rename-RUAGT2342680"
+}
+```
+
+or by `old_path`:
+
+```json
+{
+  "action": "rename",
+  "old_path": "/tmp/1000067653.mp3",
+  "new_path": "RUAGT2342680.m4a",
+  "request_id": "rename-RUAGT2342680"
+}
+```
+
+Response on `panako-store-patch-results`:
+
+```json
+{
+  "status": "renamed",
+  "action": "rename",
+  "request_id": "rename-RUAGT2342680",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a"
+}
+```
+
+Statuses:
+- `renamed` — row found, new path written
+- `rename_not_found` — no metadata row exists for the resolved `resource_id`
+- `error` — see `error` field (missing `new_path`, missing identifier source, etc.)
+
+Override stream names via env: `REDIS_PATCH_REQUEST_STREAM`, `REDIS_PATCH_RESULT_STREAM`.
 
 ## JVM Flag
 

@@ -128,6 +128,42 @@ public class PanakoStorageClickHouse implements PanakoStorage {
 		}
 	}
 
+	/**
+	 * Update only the {@code path} column of an existing metadata row, identified
+	 * by {@code resourceID}. All other columns (duration, num_fingerprints, title,
+	 * audio_url) are preserved by re-inserting them. The {@code ReplacingMergeTree}
+	 * engine collapses the duplicate row on the next background merge so the
+	 * latest insert wins.
+	 *
+	 * <p>Returns {@code true} when the row was found and a new version with the
+	 * updated path was written; {@code false} when no row exists for the given
+	 * {@code resourceID} (no-op).</p>
+	 *
+	 * <p>The underlying fingerprints in {@code panako_fingerprints} are not touched
+	 * — only the descriptive {@code path} label changes.</p>
+	 */
+	public boolean updateMetadataPath(long resourceID, String newPath) {
+		try (Connection conn = getConnection();
+			 PreparedStatement select = conn.prepareStatement(
+					 "SELECT duration, num_fingerprints, title, audio_url FROM panako_metadata FINAL WHERE resource_id = ? LIMIT 1")) {
+			select.setLong(1, resourceID);
+			try (ResultSet rs = select.executeQuery()) {
+				if (!rs.next()) return false;
+				float duration = rs.getFloat(1);
+				int fpCount = rs.getInt(2);
+				String title = rs.getString(3);
+				if (rs.wasNull()) title = null;
+				String audioUrl = rs.getString(4);
+				if (rs.wasNull()) audioUrl = null;
+				storeMetadataExt(resourceID, newPath, duration, fpCount, title, audioUrl);
+				return true;
+			}
+		} catch (SQLException e) {
+			LOG.log(Level.SEVERE, "Failed to update PANAKO metadata path for resource_id=" + resourceID, e);
+			return false;
+		}
+	}
+
 	@Override
 	public void addToStoreQueue(long fingerprintHash, int resourceIdentifier, int t1, int f1) {
 		storeQueue.add(new long[]{fingerprintHash, resourceIdentifier, t1, f1});

@@ -86,6 +86,7 @@ public class PanakoHttpServer {
 		server.createContext("/api/v1/health", new HealthHandler());
 		server.createContext("/api/v1/stats", new ApiKeyFilter(new StatsHandler(strategy)));
 		server.createContext("/api/v1/store/fingerprints", new ApiKeyFilter(new StoreFingerprintsHandler(writeLock)));
+		server.createContext("/api/v1/store/rename", new ApiKeyFilter(new RenameMetadataHandler()));
 		server.createContext("/api/v1/store/url", new ApiKeyFilter(new StoreUrlHandler(strategy, writeLock, maxUploadSizeMB)));
 		server.createContext("/api/v1/store", new ApiKeyFilter(new StoreHandler(strategy, writeLock, maxUploadSizeMB)));
 		server.createContext("/api/v1/query/fingerprints", new ApiKeyFilter(new QueryFingerprintsHandler()));
@@ -107,6 +108,7 @@ public class PanakoHttpServer {
 		System.out.printf("  POST /api/v1/store       — store audio fingerprints (multipart)%n");
 		System.out.printf("  POST /api/v1/store/url   — store audio from URL (JSON)%n");
 		System.out.printf("  POST /api/v1/store/fingerprints — store pre-computed fingerprints (JSON)%n");
+		System.out.printf("  POST /api/v1/store/rename — rename metadata path for an indexed track (JSON)%n");
 		System.out.printf("  POST /api/v1/query       — query for matches%n");
 		System.out.printf("  POST /api/v1/query/fingerprints — query with pre-computed fingerprints (JSON)%n");
 		System.out.printf("  POST /api/v1/monitor     — monitor long audio for multiple matches (multipart)%n");
