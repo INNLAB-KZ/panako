@@ -19,11 +19,7 @@ import redis.clients.jedis.resps.StreamEntry;
 import redis.clients.jedis.StreamEntryID;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.AbstractMap;
@@ -347,7 +343,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 		try {
 			Path tempFile = Files.createTempFile("panako_redis_dl_", "_" + filename);
 			try {
-				downloadFile(audioUrl, tempFile, maxBytes);
+				HttpUtil.downloadWithRetry(audioUrl, tempFile, maxBytes);
 			} catch (IOException e) {
 				Files.deleteIfExists(tempFile);
 				sendError(storeResultStream, requestId, "Download failed: " + e.getMessage());
@@ -487,7 +483,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 		try {
 			Path tempFile = Files.createTempFile("panako_redis_monitor_", "_" + filename);
 			try {
-				downloadFile(audioUrl, tempFile, maxBytes);
+				HttpUtil.downloadWithRetry(audioUrl, tempFile, maxBytes);
 			} catch (IOException e) {
 				Files.deleteIfExists(tempFile);
 				sendError(monitorResultStream, recordingId, "Download failed: " + e.getMessage());
@@ -590,9 +586,44 @@ public class PanakoRedisStreamWorker implements Runnable {
 
 		if (action.equalsIgnoreCase("rename")) {
 			handleRenameRequest(key, body, requestId);
+		} else if (action.equalsIgnoreCase("delete")) {
+			handleDeleteRequest(key, body, requestId);
 		} else {
 			sendError(patchResultStream, requestId, "Unknown patch action: " + action);
 		}
+	}
+
+	/**
+	 * Apply a {@code delete} patch: remove all fingerprints and metadata rows
+	 * for the given {@code identifier} (Int64 resource_id) or {@code path}
+	 * (hashed via {@link FileUtils#getIdentifier}). No audio file required.
+	 */
+	private void handleDeleteRequest(String key, String body, String requestId) {
+		Long identifier = extractJsonLong(body, "identifier");
+		if (identifier == null) identifier = extractJsonLong(body, "resource_id");
+		String path = extractJsonString(body, "path");
+		if (path == null) path = extractJsonString(body, "old_path");
+		long resourceId;
+		if (identifier != null) {
+			resourceId = identifier;
+		} else if (path != null && !path.isEmpty()) {
+			resourceId = FileUtils.getIdentifier(path);
+		} else {
+			sendError(patchResultStream, requestId, "Must provide 'identifier' or 'path'");
+			return;
+		}
+
+		long rowsBefore = DeleteByIdHandler.deleteById(resourceId);
+		String status = rowsBefore >= 0 ? "deleted" : "delete_failed";
+		StringBuilder json = new StringBuilder();
+		json.append("{\"status\":\"").append(status).append("\"");
+		json.append(",\"action\":\"delete\"");
+		json.append(",\"request_id\":\"").append(HttpUtil.escapeJson(requestId != null ? requestId : "")).append("\"");
+		json.append(",\"identifier\":").append(resourceId);
+		json.append(",\"rows_deleted\":").append(Math.max(rowsBefore, 0));
+		json.append("}");
+		send(patchResultStream, requestId, json.toString());
+		LOG.info("Redis patch " + status + ": resource_id=" + resourceId + " rows=" + rowsBefore);
 	}
 
 	/**
@@ -713,32 +744,6 @@ public class PanakoRedisStreamWorker implements Runnable {
 						identifier, filename, duration, fingerprintCount,
 						titlePresent ? title : null, urlPresent ? audioUrl : null);
 			}
-		}
-	}
-
-	private void downloadFile(String urlString, Path target, long maxBytes) throws IOException {
-		URL url = URI.create(urlString).toURL();
-		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-		conn.setRequestMethod("GET");
-		conn.setConnectTimeout(10_000);
-		conn.setReadTimeout(60_000);
-		conn.setInstanceFollowRedirects(true);
-		int status = conn.getResponseCode();
-		if (status < 200 || status >= 300) {
-			conn.disconnect();
-			throw new IOException("HTTP " + status + " from " + urlString);
-		}
-		try (InputStream in = conn.getInputStream(); OutputStream out = Files.newOutputStream(target)) {
-			byte[] buf = new byte[8192];
-			long total = 0;
-			int read;
-			while ((read = in.read(buf)) != -1) {
-				total += read;
-				if (total > maxBytes) throw new IOException("Download exceeds max size");
-				out.write(buf, 0, read);
-			}
-		} finally {
-			conn.disconnect();
 		}
 	}
 

@@ -93,6 +93,7 @@ public class PanakoHttpServer {
 		server.createContext("/api/v1/query", new ApiKeyFilter(new QueryHandler(strategy, maxUploadSizeMB)));
 		server.createContext("/api/v1/monitor/url", new ApiKeyFilter(new MonitorUrlHandler(strategy, maxUploadSizeMB)));
 		server.createContext("/api/v1/monitor", new ApiKeyFilter(new MonitorHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/delete/by_id", new ApiKeyFilter(new DeleteByIdHandler()));
 		server.createContext("/api/v1/delete", new ApiKeyFilter(new DeleteHandler(strategy, writeLock, maxUploadSizeMB)));
 
 		LOG.info(String.format("Panako HTTP server configured on port %d with %d threads", port, threadPoolSize));
@@ -114,6 +115,7 @@ public class PanakoHttpServer {
 		System.out.printf("  POST /api/v1/monitor     — monitor long audio for multiple matches (multipart)%n");
 		System.out.printf("  POST /api/v1/monitor/url — monitor audio from URL (JSON)%n");
 		System.out.printf("  POST /api/v1/delete      — delete fingerprints%n");
+		System.out.printf("  POST /api/v1/delete/by_id — delete fingerprints by resource_id (JSON)%n");
 		System.out.printf("  GET  /api/v1/stats       — database statistics%n");
 		System.out.printf("  GET  /api/v1/health      — health check%n");
 

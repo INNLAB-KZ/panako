@@ -20,11 +20,7 @@ import redis.clients.jedis.JedisPoolConfig;
 import redis.clients.jedis.params.XAddParams;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -352,7 +348,7 @@ public class PanakoKafkaWorker implements Runnable {
 		try {
 			Path tempFile = Files.createTempFile("panako_kafka_dl_", "_" + filename);
 			try {
-				downloadFile(audioUrl, tempFile, maxBytes);
+				HttpUtil.downloadWithRetry(audioUrl, tempFile, maxBytes);
 			} catch (IOException e) {
 				Files.deleteIfExists(tempFile);
 				sendError(storeResultTopic, requestId, "Download failed: " + e.getMessage());
@@ -493,7 +489,7 @@ public class PanakoKafkaWorker implements Runnable {
 		try {
 			Path tempFile = Files.createTempFile("panako_kafka_monitor_", "_" + filename);
 			try {
-				downloadFile(audioUrl, tempFile, maxBytes);
+				HttpUtil.downloadWithRetry(audioUrl, tempFile, maxBytes);
 			} catch (IOException e) {
 				Files.deleteIfExists(tempFile);
 				sendError(monitorResultTopic, recordingId, "Download failed: " + e.getMessage());
@@ -695,32 +691,6 @@ public class PanakoKafkaWorker implements Runnable {
 				",\"recording_id\":\"" + HttpUtil.escapeJson(recordingId != null ? recordingId : "") + "\"" +
 				",\"error\":\"" + HttpUtil.escapeJson(message != null ? message : "unknown") + "\"}";
 		send(topic, recordingId, json);
-	}
-
-	private void downloadFile(String urlString, Path target, long maxBytes) throws IOException {
-		URL url = URI.create(urlString).toURL();
-		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-		conn.setRequestMethod("GET");
-		conn.setConnectTimeout(10_000);
-		conn.setReadTimeout(60_000);
-		conn.setInstanceFollowRedirects(true);
-		int status = conn.getResponseCode();
-		if (status < 200 || status >= 300) {
-			conn.disconnect();
-			throw new IOException("HTTP " + status + " from " + urlString);
-		}
-		try (InputStream in = conn.getInputStream(); OutputStream out = Files.newOutputStream(target)) {
-			byte[] buf = new byte[8192];
-			long total = 0;
-			int read;
-			while ((read = in.read(buf)) != -1) {
-				total += read;
-				if (total > maxBytes) throw new IOException("Download exceeds max size");
-				out.write(buf, 0, read);
-			}
-		} finally {
-			conn.disconnect();
-		}
 	}
 
 	private static String filenameFromUrl(String urlString) {

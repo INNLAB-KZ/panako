@@ -162,6 +162,49 @@ public class OlafStorageClickHouse implements OlafStorage {
 		}
 	}
 
+	/**
+	 * Delete all rows for {@code resourceID} from both {@code olaf_fingerprints}
+	 * and {@code olaf_metadata}. Uses ClickHouse lightweight {@code DELETE} which
+	 * marks rows for removal and is replicated through Keeper to every replica.
+	 *
+	 * <p>Returns the row count that existed prior to deletion (sum of fingerprint
+	 * rows + metadata rows). Returns {@code -1} on SQL error.</p>
+	 */
+	public long deleteByResourceId(long resourceID) {
+		try (Connection conn = getConnection()) {
+			long fpCount;
+			long metaCount;
+			try (PreparedStatement count = conn.prepareStatement(
+					"SELECT count() FROM olaf_fingerprints WHERE resource_id = ?")) {
+				count.setLong(1, resourceID);
+				try (ResultSet rs = count.executeQuery()) {
+					fpCount = rs.next() ? rs.getLong(1) : 0;
+				}
+			}
+			try (PreparedStatement count = conn.prepareStatement(
+					"SELECT count() FROM olaf_metadata FINAL WHERE resource_id = ?")) {
+				count.setLong(1, resourceID);
+				try (ResultSet rs = count.executeQuery()) {
+					metaCount = rs.next() ? rs.getLong(1) : 0;
+				}
+			}
+			try (PreparedStatement del = conn.prepareStatement(
+					"DELETE FROM olaf_fingerprints WHERE resource_id = ?")) {
+				del.setLong(1, resourceID);
+				del.executeUpdate();
+			}
+			try (PreparedStatement del = conn.prepareStatement(
+					"DELETE FROM olaf_metadata WHERE resource_id = ?")) {
+				del.setLong(1, resourceID);
+				del.executeUpdate();
+			}
+			return fpCount + metaCount;
+		} catch (SQLException e) {
+			LOG.log(Level.SEVERE, "Failed to delete resource_id=" + resourceID, e);
+			return -1;
+		}
+	}
+
 	@Override
 	public void addToStoreQueue(long fingerprintHash, int resourceIdentifier, int t1) {
 		storeQueue.add(new long[]{fingerprintHash, resourceIdentifier, t1});

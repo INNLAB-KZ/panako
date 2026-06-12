@@ -467,6 +467,34 @@ Delete fingerprints. Accepts `multipart/form-data` with the original audio file.
 curl -X POST http://localhost:8080/api/v1/delete -F "audio=@USRC17607839.mp3"
 ```
 
+### `POST /api/v1/delete/by_id`
+
+Delete fingerprints **and** metadata for a known `resource_id` without needing the original audio file. Accepts `application/json`.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/delete/by_id \
+  -H "Content-Type: application/json" \
+  -d '{"identifier": 1979144137}'
+```
+
+- `identifier` (or alias `resource_id`) — required, the Int64 row key from `olaf_metadata`
+
+Response (HTTP 200):
+
+```json
+{
+  "status": "ok",
+  "identifier": 1979144137,
+  "rows_deleted": 13762
+}
+```
+
+`rows_deleted` is the combined row count (fingerprints + metadata) that existed prior to the call.
+
+Notes:
+- Only supported on ClickHouse storage. LMDB backends store path inside the metadata blob — use `/api/v1/delete` with the original audio file instead.
+- Implementation: issues lightweight `DELETE FROM olaf_fingerprints WHERE resource_id = ?` plus `DELETE FROM olaf_metadata WHERE resource_id = ?`. The deletion replicates through ClickHouse Keeper to every replica automatically.
+
 Response:
 
 ```json
@@ -571,7 +599,9 @@ Possible response statuses on `panako-store-results` (mirror the HTTP `/store/ur
 
 ### `panako-store-patch` — modify metadata
 
-Patch operations dispatch by the `action` field. Currently the only supported action is `rename` — change the `path` column for an existing row without re-fingerprinting.
+Patch operations dispatch by the `action` field. Supported actions: `rename`, `delete`.
+
+#### `action: "rename"` — change the `path` column for an existing row without re-fingerprinting
 
 ```json
 {
@@ -609,6 +639,45 @@ Statuses:
 - `renamed` — row found, new path written
 - `rename_not_found` — no metadata row exists for the resolved `resource_id`
 - `error` — see `error` field (missing `new_path`, missing identifier source, etc.)
+
+#### `action: "delete"` — remove fingerprints and metadata for a resource_id
+
+Async equivalent of `POST /api/v1/delete/by_id`. Useful when the workflow already produces patch requests for the same `resource_id`.
+
+```json
+{
+  "action": "delete",
+  "identifier": 1979144137,
+  "request_id": "del-FR59R2638511"
+}
+```
+
+or by `path`:
+
+```json
+{
+  "action": "delete",
+  "path": "/tmp/FR59R2638511.m4a",
+  "request_id": "del-FR59R2638511"
+}
+```
+
+Response on `panako-store-patch-results`:
+
+```json
+{
+  "status": "deleted",
+  "action": "delete",
+  "request_id": "del-FR59R2638511",
+  "identifier": 1979144137,
+  "rows_deleted": 13762
+}
+```
+
+Statuses:
+- `deleted` — issued; `rows_deleted` is the combined fingerprint + metadata row count that existed prior to the call
+- `delete_failed` — backend rejected the delete (e.g. LMDB storage active — only ClickHouse is supported)
+- `error` — see `error` field (missing identifier source, etc.)
 
 Override stream names via env: `REDIS_PATCH_REQUEST_STREAM`, `REDIS_PATCH_RESULT_STREAM`.
 
