@@ -499,13 +499,15 @@ public class PanakoRedisStreamWorker implements Runnable {
 
 			if (segments != null && !segments.isEmpty()) {
 				allResults = new ArrayList<>();
+				int skipped = 0;
 				for (int[] seg : segments) {
 					int segStart = seg[0];
 					int segDuration = seg[1] - seg[0];
 					if (segDuration <= 0) continue;
 
-					Path chunk = MonitorHandler.extractAudioChunkDouble(filePath, segStart, segDuration);
+					Path chunk = null;
 					try {
+						chunk = MonitorHandler.extractAudioChunkDouble(filePath, segStart, segDuration);
 						List<QueryResult> segResults = MonitorHandler.monitorWithAbsoluteTimes(strategy, chunk.toAbsolutePath().toString());
 						for (QueryResult r : segResults) {
 							allResults.add(new QueryResult(
@@ -514,11 +516,16 @@ public class PanakoRedisStreamWorker implements Runnable {
 									r.score, r.timeFactor, r.frequencyFactor,
 									r.percentOfSecondsWithMatches));
 						}
+					} catch (IOException e) {
+						skipped++;
+						LOG.warning("Skipping refine segment [" + segStart + "-" + seg[1] + "s] for " + recordingId + ": " + e.getMessage());
 					} finally {
-						try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
+						if (chunk != null) {
+							try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
+						}
 					}
 				}
-				LOG.info("Redis monitor (segments mode): " + segments.size() + " segments for " + recordingId);
+				LOG.info("Redis monitor (segments mode): " + segments.size() + " segments (" + skipped + " skipped) for " + recordingId);
 			} else {
 				allResults = MonitorHandler.monitorWithAbsoluteTimes(strategy, filePath);
 			}
