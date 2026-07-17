@@ -207,6 +207,29 @@ public class PanakoRedisStreamWorker implements Runnable {
 		LOG.info("Redis worker started (worker_mode=" + workerMode + ", group=" + groupId
 				+ ", consumer=" + consumerName + ") — listening on " + subscribedStreams);
 
+		// Sweep temp files left behind by prior crashes / kills. Anything older
+		// than 15 min cannot be in flight (no live task lives that long), so it
+		// is safe to delete. Prevents /tmp from filling the container overlay
+		// after successive restarts.
+		sweepStaleTempFiles(15);
+
+		// Background: hourly janitor for orphaned temp files.
+		Thread janitor = new Thread(() -> {
+			while (running) {
+				try {
+					Thread.sleep(15 * 60_000L);
+					sweepStaleTempFiles(60);
+				} catch (InterruptedException ie) {
+					Thread.currentThread().interrupt();
+					return;
+				} catch (Exception e) {
+					LOG.log(Level.FINE, "Janitor iteration failed", e);
+				}
+			}
+		}, "panako-redis-tmp-janitor-" + workerMode);
+		janitor.setDaemon(true);
+		janitor.start();
+
 		// Background thread: periodic XAUTOCLAIM for stuck messages from dead consumers
 		reclaimThread = new Thread(this::reclaimLoop, "panako-redis-reclaim-" + workerMode);
 		reclaimThread.setDaemon(true);
@@ -809,5 +832,42 @@ public class PanakoRedisStreamWorker implements Runnable {
 		if (num.length() == 0) return null;
 		try { return Long.parseLong(num.toString()); }
 		catch (NumberFormatException e) { return null; }
+	}
+
+	/**
+	 * Delete stale panako temp files older than {@code olderThanMinutes}.
+	 * Covers download temp files, waveform chunks, and segment/refine artefacts.
+	 * A previous crash before the finally block left these behind; over enough
+	 * restarts they filled the container overlay filesystem.
+	 */
+	private static void sweepStaleTempFiles(int olderThanMinutes) {
+		Path tmp = Path.of(System.getProperty("java.io.tmpdir", "/tmp"));
+		long cutoff = System.currentTimeMillis() - (olderThanMinutes * 60_000L);
+		String[] prefixes = {"panako_chunk_", "panako_redis_monitor_", "panako_redis_refine_", "panako_url_"};
+		int deleted = 0;
+		long bytes = 0;
+		try (java.util.stream.Stream<Path> paths = Files.list(tmp)) {
+			for (Path p : (Iterable<Path>) paths::iterator) {
+				String name = p.getFileName().toString();
+				boolean match = false;
+				for (String pref : prefixes) {
+					if (name.startsWith(pref)) { match = true; break; }
+				}
+				if (!match) continue;
+				try {
+					if (Files.getLastModifiedTime(p).toMillis() >= cutoff) continue;
+					long sz = Files.size(p);
+					Files.deleteIfExists(p);
+					deleted++;
+					bytes += sz;
+				} catch (IOException ignored) {}
+			}
+		} catch (IOException e) {
+			LOG.log(Level.FINE, "Temp sweep failed to list " + tmp, e);
+			return;
+		}
+		if (deleted > 0) {
+			LOG.info("Temp sweep: removed " + deleted + " stale file(s), " + (bytes / (1024 * 1024)) + " MiB freed");
+		}
 	}
 }

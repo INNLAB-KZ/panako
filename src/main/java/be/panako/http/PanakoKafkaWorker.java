@@ -258,6 +258,24 @@ public class PanakoKafkaWorker implements Runnable {
 		LOG.info("Kafka worker started (worker_mode=" + workerMode + ", kafka_mode=" + kafkaMode
 				+ ") — listening on " + topics);
 
+		// Sweep temp files left by prior crashes/kills before they fill the overlay fs.
+		sweepStaleTempFiles(15);
+		Thread janitor = new Thread(() -> {
+			while (running) {
+				try {
+					Thread.sleep(15 * 60_000L);
+					sweepStaleTempFiles(60);
+				} catch (InterruptedException ie) {
+					Thread.currentThread().interrupt();
+					return;
+				} catch (Exception e) {
+					LOG.log(Level.FINE, "Janitor iteration failed", e);
+				}
+			}
+		}, "panako-kafka-tmp-janitor-" + workerMode);
+		janitor.setDaemon(true);
+		janitor.start();
+
 		try {
 			while (running) {
 				try {
@@ -729,6 +747,42 @@ public class PanakoKafkaWorker implements Runnable {
 		}
 		if (end >= json.length()) return null;
 		return json.substring(start, end);
+	}
+
+	/**
+	 * Delete stale panako temp files older than {@code olderThanMinutes}. Prevents
+	 * crash-leaked download / chunk files from accumulating in the container overlay
+	 * across successive restarts.
+	 */
+	private static void sweepStaleTempFiles(int olderThanMinutes) {
+		Path tmp = Path.of(System.getProperty("java.io.tmpdir", "/tmp"));
+		long cutoff = System.currentTimeMillis() - (olderThanMinutes * 60_000L);
+		String[] prefixes = {"panako_chunk_", "panako_kafka_dl_", "panako_kafka_monitor_", "panako_url_"};
+		int deleted = 0;
+		long bytes = 0;
+		try (java.util.stream.Stream<Path> paths = Files.list(tmp)) {
+			for (Path p : (Iterable<Path>) paths::iterator) {
+				String name = p.getFileName().toString();
+				boolean match = false;
+				for (String pref : prefixes) {
+					if (name.startsWith(pref)) { match = true; break; }
+				}
+				if (!match) continue;
+				try {
+					if (Files.getLastModifiedTime(p).toMillis() >= cutoff) continue;
+					long sz = Files.size(p);
+					Files.deleteIfExists(p);
+					deleted++;
+					bytes += sz;
+				} catch (IOException ignored) {}
+			}
+		} catch (IOException e) {
+			LOG.log(Level.FINE, "Temp sweep failed to list " + tmp, e);
+			return;
+		}
+		if (deleted > 0) {
+			LOG.info("Temp sweep: removed " + deleted + " stale file(s), " + (bytes / (1024 * 1024)) + " MiB freed");
+		}
 	}
 
 }

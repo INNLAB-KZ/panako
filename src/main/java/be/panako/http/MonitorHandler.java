@@ -500,16 +500,27 @@ public class MonitorHandler implements HttpHandler {
 		return chunk;
 	}
 
+	/** Max waveform length (seconds). Caps memory + prevents OOM on files whose headers lie. */
+	private static final int MAX_WAVEFORM_SECONDS = 6 * 3600;
+
 	/**
 	 * Extracts waveform data (peak amplitudes) from an audio file using ffmpeg.
 	 * Returns one float per second, normalized to 0.0-1.0.
+	 *
+	 * <p>Streams PCM in 1-second chunks so heap use is bounded regardless of input
+	 * duration. Capped at {@link #MAX_WAVEFORM_SECONDS} to survive AAC containers
+	 * with lying headers (e.g. 175595s declared / 135437s real).</p>
 	 */
 	static float[] extractWaveform(String filePath) throws IOException {
 		double duration = getAudioDuration(filePath);
 		int totalSeconds = (int) Math.ceil(duration);
 		if (totalSeconds <= 0) return new float[0];
+		if (totalSeconds > MAX_WAVEFORM_SECONDS) {
+			LOG.warning("Waveform truncated: duration=" + totalSeconds + "s exceeds cap "
+					+ MAX_WAVEFORM_SECONDS + "s for " + filePath);
+			totalSeconds = MAX_WAVEFORM_SECONDS;
+		}
 
-		// Decode to raw 16-bit mono PCM at 8000 Hz (low rate for speed)
 		int sampleRate = 8000;
 		ProcessBuilder pb = new ProcessBuilder(
 				"ffmpeg", "-y", "-i", filePath,
@@ -523,25 +534,35 @@ public class MonitorHandler implements HttpHandler {
 		errThread.setDaemon(true);
 		errThread.start();
 
-		byte[] raw = p.getInputStream().readAllBytes();
-		try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-
-		int totalSamples = raw.length / 2;
 		float[] waveform = new float[totalSeconds];
+		byte[] secBuf = new byte[sampleRate * 2];
 
-		for (int sec = 0; sec < totalSeconds; sec++) {
-			int startSample = sec * sampleRate;
-			int endSample = Math.min(startSample + sampleRate, totalSamples);
-			float peak = 0;
-			for (int i = startSample; i < endSample; i++) {
-				if (i * 2 + 1 >= raw.length) break;
-				int lo = raw[i * 2] & 0xFF;
-				int hi = raw[i * 2 + 1];
-				short sample = (short) (lo | (hi << 8));
-				float abs = Math.abs(sample) / 32768.0f;
-				if (abs > peak) peak = abs;
+		try (java.io.InputStream in = p.getInputStream()) {
+			for (int sec = 0; sec < totalSeconds; sec++) {
+				int read = 0;
+				while (read < secBuf.length) {
+					int n = in.read(secBuf, read, secBuf.length - read);
+					if (n < 0) break;
+					read += n;
+				}
+				if (read < 2) break;
+
+				float peak = 0;
+				int samples = read / 2;
+				for (int i = 0; i < samples; i++) {
+					int lo = secBuf[i * 2] & 0xFF;
+					int hi = secBuf[i * 2 + 1];
+					short sample = (short) (lo | (hi << 8));
+					float abs = Math.abs(sample) / 32768.0f;
+					if (abs > peak) peak = abs;
+				}
+				waveform[sec] = peak;
+
+				if (read < secBuf.length) break;
 			}
-			waveform[sec] = peak;
+		} finally {
+			p.destroy();
+			try { p.waitFor(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
 		}
 
 		return waveform;
