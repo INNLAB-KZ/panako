@@ -196,6 +196,15 @@ Via environment variables (Docker), CLI arguments, or config file.
 | `MONITOR_OVERLAP` | 10 | Monitor window overlap (seconds) |
 | `MATCH_MIN_SCORE` | 20 | Minimum score to accept a match |
 | `MATCH_MIN_PERCENTAGE` | 0.5 | Minimum match percentage (0.0-1.0) |
+| `AUDIO_CDN_HOST` | empty | Exact CDN hostname eligible for direct-origin routing; empty disables rewrite |
+| `AUDIO_ORIGIN_BASE_URL` | empty | Object-storage base URL prepended to CDN paths; empty disables rewrite |
+| `AUDIO_ORIGIN_FALLBACK_TO_CDN` | TRUE | Retry original CDN URL after origin download failure |
+
+Redis monitor workers resolve matching CDN URLs immediately before download. For example,
+`https://cdn-broadcast.ozenx.io/recordings/a.m4a` becomes
+`https://hel1.your-objectstorage.com/broadcast/recordings/a.m4a`. Path and query are preserved,
+while query parameters are omitted from logs. Failed origin downloads remove partial files and
+fall back once to original CDN URL when fallback is enabled.
 
 See [API_README.md](API_README.md) for full API documentation and all configuration options.
 

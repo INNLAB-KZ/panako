@@ -48,7 +48,7 @@ public final class HttpUtil {
 			try {
 				downloadOnce(urlString, target, maxBytes);
 				if (attempt > 1) {
-					LOG.info("Download succeeded on attempt " + attempt + " for " + urlString);
+					LOG.info("Download succeeded on attempt " + attempt + " for " + redactUrl(urlString));
 				}
 				return;
 			} catch (IOException e) {
@@ -56,7 +56,8 @@ public final class HttpUtil {
 				if (attempt >= DEFAULT_DOWNLOAD_ATTEMPTS) break;
 				long sleepMs = DOWNLOAD_BACKOFF_MS[Math.min(attempt - 1, DOWNLOAD_BACKOFF_MS.length - 1)];
 				LOG.log(Level.WARNING, "Download attempt " + attempt + "/" + DEFAULT_DOWNLOAD_ATTEMPTS
-						+ " failed for " + urlString + " — retrying in " + sleepMs + "ms: " + e.getMessage());
+						+ " failed for " + redactUrl(urlString) + " — retrying in " + sleepMs
+						+ "ms (" + e.getClass().getSimpleName() + ")");
 				try {
 					Thread.sleep(sleepMs);
 				} catch (InterruptedException ie) {
@@ -79,7 +80,7 @@ public final class HttpUtil {
 		int status = conn.getResponseCode();
 		if (status < 200 || status >= 300) {
 			conn.disconnect();
-			throw new IOException("HTTP " + status + " from " + urlString);
+			throw new IOException("HTTP " + status + " from " + redactUrl(urlString));
 		}
 
 		try (InputStream in = conn.getInputStream();
@@ -96,6 +97,18 @@ public final class HttpUtil {
 			}
 		} finally {
 			conn.disconnect();
+		}
+	}
+
+	/** Removes user info, query, and fragment before a URL is written to logs. */
+	static String redactUrl(String urlString) {
+		try {
+			URI uri = URI.create(urlString);
+			if (uri.getScheme() == null || uri.getHost() == null) return "<invalid-url>";
+			return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(),
+					uri.getPath(), null, null).toASCIIString();
+		} catch (Exception e) {
+			return "<invalid-url>";
 		}
 	}
 

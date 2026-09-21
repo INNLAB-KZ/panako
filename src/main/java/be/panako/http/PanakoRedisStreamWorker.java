@@ -506,7 +506,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 		try {
 			Path tempFile = Files.createTempFile("panako_redis_monitor_", "_" + filename);
 			try {
-				HttpUtil.downloadWithRetry(audioUrl, tempFile, maxBytes);
+				AudioDownloadRouter.download(audioUrl, tempFile, maxBytes);
 			} catch (IOException e) {
 				Files.deleteIfExists(tempFile);
 				sendError(monitorResultStream, recordingId, "Download failed: " + e.getMessage());

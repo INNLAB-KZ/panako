@@ -503,6 +503,15 @@ public enum Key{
 	 */
 	MONITOR_WINDOW_GAP_THRESHOLD(30.0),
 
+	/** CDN hostname eligible for direct-origin audio routing. Empty disables routing. */
+	AUDIO_CDN_HOST(""),
+
+	/** Object-storage base URL used for matching CDN audio URLs. Empty disables routing. */
+	AUDIO_ORIGIN_BASE_URL(""),
+
+	/** Retry original CDN URL after direct-origin download failure. */
+	AUDIO_ORIGIN_FALLBACK_TO_CDN("TRUE"),
+
 	/**
 	 * ClickHouse JDBC URL for OLAF storage.
 	 * Used when OLAF_STORAGE=CLICKHOUSE.

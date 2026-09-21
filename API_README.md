@@ -578,6 +578,19 @@ When `REDIS_ENABLED=true`, workers also consume tasks from Redis Streams instead
 
 Each request is XADDed with `{"key": "<request_id>", "value": "<json>"}`. Responses are XADDed the same way to the matching result stream.
 
+Monitor audio downloads support direct-origin routing without changing stream payloads:
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUDIO_CDN_HOST` | empty | Exact source hostname to rewrite; empty disables routing |
+| `AUDIO_ORIGIN_BASE_URL` | empty | Absolute HTTP(S) object-storage base URL; empty disables routing |
+| `AUDIO_ORIGIN_FALLBACK_TO_CDN` | `TRUE` | Retry original source URL after origin failure |
+
+When configured for `cdn-broadcast.ozenx.io` and
+`https://hel1.your-objectstorage.com/broadcast`, path and query are preserved. URL logs omit query
+parameters. Both `panako.monitor.request` and `panako.monitor.refine.request` use this shared
+download path.
+
 ### `panako-store-requests` — store by URL
 
 ```json
