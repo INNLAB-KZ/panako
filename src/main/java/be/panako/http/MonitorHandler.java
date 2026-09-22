@@ -640,10 +640,12 @@ public class MonitorHandler implements HttpHandler {
 			}
 		}
 
-		// Filter out false positives: low score or low match percentage
+		// Filter out false positives. Use the strongest individual window for the
+		// percentage gate: averaging a valid detection with weaker overlapping
+		// windows can otherwise hide the entire track.
 		int minScore = Config.getInt(Key.MONITOR_MIN_SCORE);
 		double minPct = Config.getFloat(Key.MONITOR_MIN_PERCENTAGE);
-		merged.removeIf(mm -> mm.score < minScore || mm.matchPercentage < minPct);
+		merged.removeIf(mm -> mm.score < minScore || mm.bestWindowMatchPercentage < minPct);
 
 		// Sort by query start time
 		merged.sort(Comparator.comparingDouble(mm -> mm.queryStart));
@@ -798,17 +800,20 @@ public class MonitorHandler implements HttpHandler {
 		double sumTimeFactor = 0;
 		double sumFreqFactor = 0;
 		double sumMatchPct = 0;
+		double bestMatchPct = 0;
 		int totalScore = 0;
 		for (QueryResult r : group) {
 			sumTimeFactor += r.timeFactor;
 			sumFreqFactor += r.frequencyFactor;
 			sumMatchPct += r.percentOfSecondsWithMatches;
+			bestMatchPct = Math.max(bestMatchPct, r.percentOfSecondsWithMatches);
 			totalScore += (int) r.score;
 		}
 		m.score = totalScore;
 		m.timeFactor = sumTimeFactor / group.size();
 		m.frequencyFactor = sumFreqFactor / group.size();
 		m.matchPercentage = sumMatchPct / group.size();
+		m.bestWindowMatchPercentage = bestMatchPct;
 		m.windowHits = group.size();
 		recomputeEnvelopeFromWindows(m);
 	}
@@ -976,6 +981,7 @@ public class MonitorHandler implements HttpHandler {
 		double timeFactor;
 		double frequencyFactor;
 		double matchPercentage;
+		double bestWindowMatchPercentage;
 		int windowHits;
 		/**
 		 * Per-occurrence breakdown: each entry corresponds to a contiguous group
