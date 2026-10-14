@@ -100,7 +100,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 
 	private final MatchValidator validator = new MatchValidator();
 	/** match_percentage threshold above which the upload is treated as a duplicate of an already-indexed track. */
-	private static final double CONTENT_DUP_MATCH_PERCENTAGE = 99.0;
+	private static final double CONTENT_DUP_MATCH_PERCENTAGE = 0.99;
 
 	private static String getEnvOrDefault(String name, String defaultValue) {
 		String val = System.getProperty(name);
@@ -407,14 +407,14 @@ public class PanakoRedisStreamWorker implements Runnable {
 					json.append(",\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\"");
 					json.append(",\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title));
 					json.append(",\"audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\"");
-					json.append(",\"duration_seconds\":").append(String.format("%.1f", meta[0]));
+					json.append(",\"duration_seconds\":").append(HttpUtil.formatOneDecimal(meta[0]));
 					json.append(",\"fingerprints_count\":").append((int) meta[1]);
 					json.append("}");
 					send(storeResultStream, requestId, json.toString());
 					return;
 				}
 				writeLock.lock();
-				try { strategy.delete(filePath); } finally { writeLock.unlock(); }
+				try { StoreResourceCleanup.delete(strategy, filePath, identifier); } finally { writeLock.unlock(); }
 			}
 
 			// Content-based duplicate check: same audio already indexed under a different
@@ -424,7 +424,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 			if (contentDup != null) {
 				LOG.info("Content duplicate for " + filename
 						+ " — matches refId=" + contentDup.refIdentifier
-						+ " at " + String.format("%.1f", contentDup.percentOfSecondsWithMatches) + "%");
+						+ " at " + HttpUtil.formatPercentage(contentDup.percentOfSecondsWithMatches) + "%");
 				String matchedIsrc = HttpUtil.extractIsrc(contentDup.refPath);
 				String[] extras = QueryHandler.lookupExtras(contentDup.refIdentifier);
 				StringBuilder json = new StringBuilder();
@@ -435,7 +435,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 				json.append(",\"filename\":\"").append(HttpUtil.escapeJson(contentDup.refPath)).append("\"");
 				json.append(",\"title\":").append(StoreFingerprintsHandler.jsonNullableString(extras[0]));
 				json.append(",\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(extras[1]));
-				json.append(",\"match_percentage\":").append(String.format("%.1f", contentDup.percentOfSecondsWithMatches));
+				json.append(",\"match_percentage\":").append(HttpUtil.formatPercentage(contentDup.percentOfSecondsWithMatches));
 				json.append(",\"submitted_filename\":\"").append(HttpUtil.escapeJson(filename)).append("\"");
 				json.append(",\"submitted_audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\"");
 				json.append(",\"submitted_isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\"");
@@ -453,7 +453,8 @@ public class PanakoRedisStreamWorker implements Runnable {
 				writeLock.unlock();
 			}
 			long processingTimeMs = System.currentTimeMillis() - startTime;
-			int fpCount = (int) Math.round(durationInSeconds * 7);
+			double[] storedMeta = HttpUtil.parseMetadata(strategy.metadata(filePath));
+			int fpCount = storedMeta != null ? (int) storedMeta[1] : 0;
 
 			persistExtras(identifier, filename, (float) durationInSeconds, fpCount, title, audioUrl);
 
@@ -465,7 +466,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 			json.append(",\"filename\":\"").append(HttpUtil.escapeJson(filename)).append("\"");
 			json.append(",\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title));
 			json.append(",\"audio_url\":\"").append(HttpUtil.escapeJson(audioUrl)).append("\"");
-			json.append(",\"duration_seconds\":").append(String.format("%.1f", durationInSeconds));
+			json.append(",\"duration_seconds\":").append(HttpUtil.formatOneDecimal(durationInSeconds));
 			json.append(",\"fingerprints_count\":").append(fpCount);
 			json.append(",\"processing_time_ms\":").append(processingTimeMs);
 			json.append("}");
@@ -580,6 +581,10 @@ public class PanakoRedisStreamWorker implements Runnable {
 	 * exists.
 	 */
 	private QueryResult findContentDuplicate(String filePath) {
+		if (Config.get(Key.STRATEGY).equalsIgnoreCase("OLAF")) {
+			double duration = be.panako.util.AudioFileUtils.audioFileDurationInSeconds(new java.io.File(filePath));
+			if (duration > LongAudioDuplicateCheck.SAMPLE_SECONDS) return LongAudioDuplicateCheck.find(strategy, validator, filePath, duration);
+		}
 		int maxResults = Config.getInt(Key.NUMBER_OF_QUERY_RESULTS);
 		List<QueryResult> results = new ArrayList<>();
 		strategy.query(filePath, maxResults, new HashSet<>(), new QueryResultHandler() {

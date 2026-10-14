@@ -123,6 +123,7 @@ public class OlafStorageClickHouse implements OlafStorage {
 			ps.executeUpdate();
 		} catch (SQLException e) {
 			LOG.log(Level.SEVERE, "Failed to store metadata", e);
+			throw new IllegalStateException("Failed to store OLAF metadata", e);
 		}
 	}
 
@@ -227,6 +228,7 @@ public class OlafStorageClickHouse implements OlafStorage {
 			LOG.info("Stored " + storeQueue.size() + " fingerprints to ClickHouse");
 		} catch (SQLException e) {
 			LOG.log(Level.SEVERE, "Failed to process store queue (" + storeQueue.size() + " items)", e);
+			throw new IllegalStateException("Failed to store OLAF fingerprints", e);
 		} finally {
 			storeQueue.clear();
 		}

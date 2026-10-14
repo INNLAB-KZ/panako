@@ -42,7 +42,7 @@ public class StoreHandler implements HttpHandler {
 	private final MatchValidator validator = new MatchValidator();
 
 	/** match_percentage threshold above which the upload is treated as a duplicate of an already-indexed track. */
-	private static final double CONTENT_DUP_MATCH_PERCENTAGE = 99.0;
+	private static final double CONTENT_DUP_MATCH_PERCENTAGE = 0.99;
 
 	public StoreHandler(Strategy strategy, ReentrantLock writeLock, int maxUploadSizeMB) {
 		this.strategy = strategy;
@@ -113,7 +113,7 @@ public class StoreHandler implements HttpHandler {
 					json.append("\"filename\":\"").append(HttpUtil.escapeJson(upload.fileName)).append("\",");
 					json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title)).append(",");
 					json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(audioUrl)).append(",");
-					json.append("\"duration_seconds\":").append(String.format("%.1f", meta[0])).append(",");
+					json.append("\"duration_seconds\":").append(HttpUtil.formatOneDecimal(meta[0])).append(",");
 					json.append("\"fingerprints_count\":").append((int) meta[1]);
 					json.append("}");
 					HttpUtil.sendJson(exchange, 200, json.toString());
@@ -123,7 +123,7 @@ public class StoreHandler implements HttpHandler {
 				LOG.warning("Incomplete data for " + upload.fileName + " — deleting and re-storing");
 				writeLock.lock();
 				try {
-					strategy.delete(filePath);
+					StoreResourceCleanup.delete(strategy, filePath, identifier);
 				} finally {
 					writeLock.unlock();
 				}
@@ -136,7 +136,7 @@ public class StoreHandler implements HttpHandler {
 			if (contentDup != null) {
 				LOG.info("Content duplicate for " + upload.fileName
 						+ " — matches refId=" + contentDup.refIdentifier
-						+ " at " + String.format("%.1f", contentDup.percentOfSecondsWithMatches) + "%");
+						+ " at " + HttpUtil.formatPercentage(contentDup.percentOfSecondsWithMatches) + "%");
 				String matchedIsrc = HttpUtil.extractIsrc(contentDup.refPath);
 				String[] extras = QueryHandler.lookupExtras(contentDup.refIdentifier);
 				StringBuilder json = new StringBuilder();
@@ -147,7 +147,7 @@ public class StoreHandler implements HttpHandler {
 				json.append("\"filename\":\"").append(HttpUtil.escapeJson(contentDup.refPath)).append("\",");
 				json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(extras[0])).append(",");
 				json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(extras[1])).append(",");
-				json.append("\"match_percentage\":").append(String.format("%.1f", contentDup.percentOfSecondsWithMatches)).append(",");
+				json.append("\"match_percentage\":").append(HttpUtil.formatPercentage(contentDup.percentOfSecondsWithMatches)).append(",");
 				json.append("\"submitted_filename\":\"").append(HttpUtil.escapeJson(upload.fileName)).append("\",");
 				json.append("\"submitted_isrc\":\"").append(HttpUtil.escapeJson(isrc)).append("\"");
 				json.append("}");
@@ -166,7 +166,8 @@ public class StoreHandler implements HttpHandler {
 			}
 
 			long processingTimeMs = System.currentTimeMillis() - startTime;
-			int fingerprintCount = (int) Math.round(durationInSeconds * 7);
+			double[] storedMeta = HttpUtil.parseMetadata(strategy.metadata(filePath));
+			int fingerprintCount = storedMeta != null ? (int) storedMeta[1] : 0;
 
 			persistExtras(identifier, upload.fileName, (float) durationInSeconds, fingerprintCount, title, audioUrl);
 
@@ -178,7 +179,7 @@ public class StoreHandler implements HttpHandler {
 			json.append("\"filename\":\"").append(HttpUtil.escapeJson(upload.fileName)).append("\",");
 			json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(title)).append(",");
 			json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(audioUrl)).append(",");
-			json.append("\"duration_seconds\":").append(String.format("%.1f", durationInSeconds)).append(",");
+			json.append("\"duration_seconds\":").append(HttpUtil.formatOneDecimal(durationInSeconds)).append(",");
 			json.append("\"fingerprints_count\":").append(fingerprintCount).append(",");
 			json.append("\"processing_time_ms\":").append(processingTimeMs);
 			json.append("}");
@@ -217,6 +218,10 @@ public class StoreHandler implements HttpHandler {
 	 * exists.
 	 */
 	private QueryResult findContentDuplicate(String filePath) {
+		if (Config.get(Key.STRATEGY).equalsIgnoreCase("OLAF")) {
+			double duration = be.panako.util.AudioFileUtils.audioFileDurationInSeconds(new java.io.File(filePath));
+			if (duration > LongAudioDuplicateCheck.SAMPLE_SECONDS) return LongAudioDuplicateCheck.find(strategy, validator, filePath, duration);
+		}
 		int maxResults = Config.getInt(Key.NUMBER_OF_QUERY_RESULTS);
 		List<QueryResult> results = new ArrayList<>();
 		strategy.query(filePath, maxResults, new HashSet<>(), new QueryResultHandler() {

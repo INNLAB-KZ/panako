@@ -60,6 +60,8 @@ import be.tarsos.dsp.util.PitchConverter;
  */
 public class OlafStrategy extends Strategy {
 	private static final int MAX_TIME = 5_000_000;
+	private static final int STORE_CHUNK_SECONDS = 300;
+	private static final int STORE_OVERLAP_SECONDS = 2;
 	
 	private final static Logger LOG = Logger.getLogger(OlafStrategy.class.getName());
 
@@ -100,36 +102,72 @@ public class OlafStrategy extends Strategy {
 	public double store(String resource, String description) {
 
 		OlafStorage db = getStorage();
-		
-		List<OlafFingerprint> prints = toFingerprints(resource);
-		
 		int resourceID = FileUtils.getIdentifier(resource);
-		//store
-		for(OlafFingerprint print : prints) {
-			long hash = print.hash();			
-			int printT1 = print.t1;
-			db.addToStoreQueue(hash, resourceID, printT1);
+		float expectedDuration = AudioFileUtils.audioFileDurationInSeconds(new File(resource));
+		if (expectedDuration > STORE_CHUNK_SECONDS) {
+			return storeInChunks(resource, db, resourceID, expectedDuration);
+		}
+		List<OlafFingerprint> prints = toFingerprints(resource);
+		for (OlafFingerprint print : prints) {
+			db.addToStoreQueue(print.hash(), resourceID, print.t1);
 		}
 		db.processStoreQueue();
-		
-		//store meta-data as well
-		float duration = 0;
-		if(prints.size() != 0) {
-			duration = blocksToSeconds(prints.get(prints.size()-1).t3);
-			LOG.info(String.format("Stored %d fingerprints for '%s', id: %d", prints.size() , resource ,resourceID));
-		}else {
-			LOG.warning("Warning: no prints extracted for " + resource);
-			
-		}
-		int numberOfPrints = prints.size();
-		
-		db.storeMetadata(resourceID,resource,duration,numberOfPrints);
-		
-		//storage is done: 
-		//try to clear memory
-		System.gc();
-		
+		float duration = prints.isEmpty() ? 0 : blocksToSeconds(prints.get(prints.size() - 1).t3);
+		db.storeMetadata(resourceID, resource, duration, prints.size());
 		return duration;
+	}
+
+	private double storeInChunks(String resource, OlafStorage storage, int resourceID, float expectedDuration) {
+		OlafStorageClickHouse clickHouse = Config.get(Key.OLAF_STORAGE).equalsIgnoreCase("CLICKHOUSE")
+				? OlafStorageClickHouse.getInstance() : null;
+		int sampleRate = Config.getInt(Key.OLAF_SAMPLE_RATE);
+		int stepSize = Config.getInt(Key.OLAF_STEP_SIZE);
+		int fftSize = Config.getInt(Key.OLAF_SIZE);
+		int count = 0;
+		float decodedEnd = 0;
+		try {
+			// A retry can recognize an interrupted store without scanning the fingerprint table.
+			storage.storeMetadata(resourceID, resource, 0, 0);
+			for (int coreStart = 0; coreStart < expectedDuration; coreStart += STORE_CHUNK_SECONDS) {
+				int offsetFrames = (int) Math.floor(Math.max(0, coreStart - STORE_OVERLAP_SECONDS) * sampleRate / stepSize);
+				double start = offsetFrames * (double) stepSize / sampleRate;
+				double stop = Math.min(expectedDuration, coreStart + STORE_CHUNK_SECONDS + STORE_OVERLAP_SECONDS);
+				AudioDispatcher dispatcher = AudioDispatcherFactory.fromPipe(resource, sampleRate, fftSize,
+						fftSize - stepSize, start, stop - start);
+				OlafEventPointProcessor processor = new OlafEventPointProcessor(fftSize);
+				dispatcher.addAudioProcessor(processor);
+				dispatcher.run();
+				float processed = dispatcher.secondsProcessed();
+				if (processed <= 0 || (processed + 1 < stop - start && stop < expectedDuration - 1)) {
+					throw new IllegalStateException("Audio decode ended before chunk " + coreStart + "s");
+				}
+				int coreStartFrames = (int) Math.round(coreStart * sampleRate / stepSize);
+				int coreEndFrames = (int) Math.round(Math.min(expectedDuration,
+						coreStart + STORE_CHUNK_SECONDS) * sampleRate / stepSize);
+				for (OlafFingerprint print : processor.getFingerprints()) {
+					int absoluteT1 = offsetFrames + print.t1;
+					if (absoluteT1 >= coreStartFrames && absoluteT1 < coreEndFrames) {
+						storage.addToStoreQueue(print.hash(), resourceID, absoluteT1);
+						count++;
+					}
+				}
+				storage.processStoreQueue();
+				decodedEnd = (float) Math.max(decodedEnd, start + processed);
+				LOG.info("Stored chunk " + coreStart + "s for '" + resource + "'");
+			}
+			if (count == 0 || decodedEnd + 1 < expectedDuration) {
+				throw new IllegalStateException("Audio decode incomplete for " + resource);
+			}
+			storage.storeMetadata(resourceID, resource, expectedDuration, count);
+			LOG.info("Stored " + count + " fingerprints for '" + resource + "', id: " + resourceID);
+			return expectedDuration;
+		} catch (RuntimeException e) {
+			storage.clearStoreQueue();
+			if (clickHouse != null && clickHouse.deleteByResourceId(resourceID) < 0) {
+				LOG.warning("Could not clear partial fingerprints for " + resource);
+			}
+			throw e;
+		}
 	}
 
 	@Override
@@ -429,9 +467,8 @@ public class OlafStrategy extends Strategy {
 						 
 						 //retrieve meta-data
 						 OlafResourceMetadata metadata = db.getMetadata((long) identifier);
-						 String refPath = "metadata unavailable!";
-						 if(metadata != null )
-							 refPath = metadata.path;
+						 if (metadata == null || metadata.duration <= 0 || metadata.numFingerprints <= 0) return;
+						 String refPath = metadata.path;
 						 
 						 //Construct a histogram with the number of matches for each second
 						 //Ideally there is a more or less equal number of matches each second
@@ -510,9 +547,8 @@ public class OlafStrategy extends Strategy {
 
 						//retrieve meta-data
 						OlafResourceMetadata metadata = db.getMetadata((long) identifier);
-						String refPath = "metadata unavailable!";
-						if (metadata != null)
-							refPath = metadata.path;
+						if (metadata == null || metadata.duration <= 0 || metadata.numFingerprints <= 0) return;
+						String refPath = metadata.path;
 
 						//Construct a histogram with the number of matches for each second
 						//Ideally there is a more or less equal number of matches each second
@@ -728,6 +764,6 @@ public class OlafStrategy extends Strategy {
 		final OlafStorage db = getStorage();
 		long identifier = FileUtils.getIdentifier(path);
 		OlafResourceMetadata metaData = db.getMetadata(identifier);
-		return String.format("%d ; %s ; %.3f (s) ; %d (#) ; %.3f (#/s)",metaData.identifier,metaData.path,metaData.duration,metaData.numFingerprints,metaData.printsPerSecond());
+		return String.format(Locale.ROOT, "%d ; %s ; %.3f (s) ; %d (#) ; %.3f (#/s)",metaData.identifier,metaData.path,metaData.duration,metaData.numFingerprints,metaData.printsPerSecond());
 	}
 }

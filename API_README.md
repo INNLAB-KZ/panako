@@ -129,6 +129,8 @@ Response:
 
 Store audio fingerprints. Accepts `multipart/form-data` with field name `audio`.
 
+OLAF indexes audio longer than five minutes in overlapping five-minute chunks under one resource ID. Stored fingerprint times remain relative to the full track. For OLAF, content deduplication of audio longer than 30 seconds queries overlapping 30-second windows across the whole file and requires every window to match the same track at a consistent alignment, with a duration within 5 seconds. The response reports the stored fingerprint count. If any chunk fails, indexing returns an error and removes partial ClickHouse rows.
+
 Filename should be `ISRC.ext` (e.g. `USRC17607839.mp3`). The ISRC is extracted and returned in the response.
 
 ```bash

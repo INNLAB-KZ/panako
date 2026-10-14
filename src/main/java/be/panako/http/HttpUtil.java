@@ -20,6 +20,13 @@ import java.util.logging.Logger;
  * Shared HTTP utilities for the Panako API handlers.
  */
 public final class HttpUtil {
+	public static String formatOneDecimal(double value) {
+		return String.format(java.util.Locale.ROOT, "%.1f", value);
+	}
+
+	public static String formatPercentage(double fraction) {
+		return formatOneDecimal(fraction * 100);
+	}
 
 	private static final Logger LOG = Logger.getLogger(HttpUtil.class.getName());
 
