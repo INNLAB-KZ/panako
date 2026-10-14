@@ -517,7 +517,7 @@ All parameters can be set via CLI arguments (`KEY=VALUE`), system properties (`-
 |---|---|---|
 | `API_KEY` | _(empty)_ | API key for authentication. If empty, auth is disabled |
 | `SERVER_PORT` | 8080 | HTTP server port |
-| `SERVER_MAX_UPLOAD_SIZE_MB` | 100 | Maximum upload file size in MB |
+| `SERVER_MAX_UPLOAD_SIZE_MB` | 256 | Maximum upload file size in MB |
 | `SERVER_THREAD_POOL_SIZE` | 10 | HTTP handler thread pool size |
 | `STRATEGY` | OLAF | Fingerprinting algorithm (`OLAF` or `PANAKO`) |
 
@@ -577,6 +577,10 @@ When `REDIS_ENABLED=true`, workers also consume tasks from Redis Streams instead
 | `panako-store-patch` | `panako-store-patch-results` | Patch `olaf_metadata` rows without re-fingerprinting (rename, etc) |
 | `panako.monitor.request` | `panako.monitor.response` | Monitor long audio for multiple matches |
 | `panako.monitor.refine.request` | `panako.monitor.refine.response` | Stage 3 refine (dedicated pool, `PANAKO_WORKER_MODE=refine`) |
+
+Set `REDIS_STORE_PATCH_ENABLED=false` to exclude `panako-store-patch` from a Redis
+STORE/ALL worker while continuing ingestion. Default: `true`. This pauses maintenance
+only for workers with this setting; queued requests remain in Redis.
 
 Each request is XADDed with `{"key": "<request_id>", "value": "<json>"}`. Responses are XADDed the same way to the matching result stream.
 

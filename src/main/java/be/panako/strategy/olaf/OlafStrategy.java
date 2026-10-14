@@ -288,11 +288,12 @@ public class OlafStrategy extends Strategy {
 
 	private int mostCommonDeltaTforHitList(List<OlafMatch> hitList) {
 		Map<Integer,Integer> countPerDiff = new HashMap<>();
-		hitList.forEach((hit)->{
-			int deltaT = hit.deltaT();
-			if(!countPerDiff.containsKey(deltaT))
-				countPerDiff.put(deltaT, 0);
-			countPerDiff.put(deltaT, countPerDiff.get(deltaT)+1);
+		hitList.forEach(hit -> {
+			// Reuse the boxed key for lookup and update. Keep HashMap insertion
+			// order and the strict maximum comparison below: ties affect matching.
+			Integer deltaT = hit.deltaT();
+			Integer count = countPerDiff.get(deltaT);
+			countPerDiff.put(deltaT, count == null ? 1 : count + 1);
 		});
 		
 		int maxCount = 0;
@@ -349,25 +350,9 @@ public class OlafStrategy extends Strategy {
 		 
 		 final List<QueryResult> queryResults = new ArrayList<>();
 		 
-		 matchAccumulator.forEach((fingerprintHash, dbHits) -> {
-			 
-			 dbHits.forEach((dbHit)->{
-				//long matchingHash  = data[0];
-				 int identifier = dbHit.resourceID;
-				 int matchTime = dbHit.t;
-				 if(!hitsPerIdentifer.containsKey(identifier)){
-					hitsPerIdentifer.put(identifier, new ArrayList<OlafMatch>());
-				 }
-				 OlafMatch hit = new OlafMatch();
-				 hit.identifier = identifier;
-				 hit.matchTime = matchTime;
-				 hit.originalHash = dbHit.originalHash;
-				 hit.matchedNearHash = dbHit.matchedNearHash;
-				 hit.queryTime = printMap.get(fingerprintHash).t1;
-				 hitsPerIdentifer.get(identifier).add(hit);
-			 });
-		 });
-		 
+		 drainHits(matchAccumulator, printMap, hitsPerIdentifer);
+		 printMap.clear();
+
 		 int minimumUnfilteredHits = Config.getInt(Key.OLAF_MIN_HITS_UNFILTERED);
 		 int minimumFilteredHits = Config.getInt(Key.OLAF_MIN_HITS_FILTERED);
 		 
@@ -593,6 +578,31 @@ public class OlafStrategy extends Strategy {
 				 handler.handleQueryResult(r);
 			 }
 		 }
+	}
+
+	/** Consume database hits as matches are created, avoiding two full live copies. */
+	static void drainHits(Map<Long, List<OlafHit>> accumulator,
+			Map<Long, OlafFingerprint> prints, Map<Integer, List<OlafMatch>> matches) {
+		OlafMatchBuckets buckets = new OlafMatchBuckets(matches);
+		var entries = accumulator.entrySet().iterator();
+		while (entries.hasNext()) {
+			var entry = entries.next();
+			int queryTime = prints.get(entry.getKey()).t1;
+			var hits = entry.getValue().listIterator();
+			while (hits.hasNext()) {
+				OlafHit dbHit = hits.next();
+				OlafMatch hit = new OlafMatch();
+				hit.identifier = dbHit.resourceID;
+				hit.matchTime = dbHit.t;
+				hit.originalHash = dbHit.originalHash;
+				hit.matchedNearHash = dbHit.matchedNearHash;
+				hit.queryTime = queryTime;
+				buckets.get(hit.identifier).add(hit);
+				// Release even a very large bucket incrementally, without shifting its array.
+				hits.set(null);
+			}
+			entries.remove();
+		}
 	}
 
 	@Override

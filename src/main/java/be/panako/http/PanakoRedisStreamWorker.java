@@ -13,8 +13,6 @@ import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPoolConfig;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.params.XAddParams;
-import redis.clients.jedis.params.XAutoClaimParams;
-import redis.clients.jedis.params.XReadGroupParams;
 import redis.clients.jedis.resps.StreamEntry;
 import redis.clients.jedis.StreamEntryID;
 
@@ -39,24 +37,24 @@ import java.util.logging.Logger;
  * instead of Kafka. Stream names match the Kafka topic names so the same
  * orchestrator schema works for both backends.</p>
  *
- * <p>Per-task lifecycle:
+ * <p>Per-task lifecycle:</p>
  * <ol>
  *   <li>{@code XREADGROUP} claims one pending entry (blocks up to 5s).</li>
  *   <li>Worker processes the task (store / monitor).</li>
  *   <li>{@code XADD} publishes the result to the response stream.</li>
  *   <li>{@code XACK} acknowledges the input message.</li>
  * </ol>
- * On crash, the message stays in the consumer group's Pending Entries List
+ * <p>On crash, the message stays in the consumer group's Pending Entries List
  * and is reclaimed via {@code XAUTOCLAIM} after {@code REDIS_CLAIM_IDLE_MS}
- * (default 10 min).</p>
+ * (default 10 min). Active tasks refresh their pending-entry idle time. Fresh
+ * and reclaimed tasks execute sequentially within each Redis worker.</p>
  *
- * <p>Stream names (configurable via env, defaults shown):
+ * <p>Stream names (configurable via env, defaults shown):</p>
  * <ul>
  *   <li>{@code panako.monitor.request} / {@code panako.monitor.response}</li>
  *   <li>{@code panako.monitor.refine.request} / {@code panako.monitor.refine.response} (refine mode)</li>
  *   <li>{@code panako-store-requests} / {@code panako-store-results}</li>
  * </ul>
- * </p>
  */
 public class PanakoRedisStreamWorker implements Runnable {
 
@@ -96,7 +94,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 	private final long blockMs;
 
 	private volatile boolean running = true;
-	private Thread reclaimThread;
+	private final RedisTaskDispatcher dispatcher;
 
 	private final MatchValidator validator = new MatchValidator();
 	/** match_percentage threshold above which the upload is treated as a duplicate of an already-indexed track. */
@@ -141,7 +139,9 @@ public class PanakoRedisStreamWorker implements Runnable {
 		} else {
 			if (mode.equals("ALL") || mode.equals("STORE")) {
 				streams.add(storeRequestStream);
-				streams.add(patchRequestStream);
+				if (Boolean.parseBoolean(getEnvOrDefault("REDIS_STORE_PATCH_ENABLED", "true"))) {
+					streams.add(patchRequestStream);
+				}
 			}
 			if (mode.equals("ALL") || mode.equals("MONITOR")) streams.add(monitorRequestStream);
 		}
@@ -157,7 +157,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 		this.blockMs = Long.parseLong(getEnvOrDefault("REDIS_BLOCK_MS", "5000"));
 
 		JedisPoolConfig poolConfig = new JedisPoolConfig();
-		poolConfig.setMaxTotal(poolSize);
+		poolConfig.setMaxTotal(Math.max(3, poolSize)); // processing, result publication, heartbeat
 		poolConfig.setMaxIdle(poolSize);
 		poolConfig.setMinIdle(1);
 		poolConfig.setTestOnBorrow(false);
@@ -194,11 +194,12 @@ public class PanakoRedisStreamWorker implements Runnable {
 				}
 			}
 		}
+		this.dispatcher = new RedisTaskDispatcher(pool, groupId, consumerName,
+				subscribedStreams, claimIdleMs, blockMs);
 	}
 
 	public void stop() {
 		running = false;
-		if (reclaimThread != null) reclaimThread.interrupt();
 		try { pool.close(); } catch (Exception ignored) {}
 	}
 
@@ -230,32 +231,10 @@ public class PanakoRedisStreamWorker implements Runnable {
 		janitor.setDaemon(true);
 		janitor.start();
 
-		// Background thread: periodic XAUTOCLAIM for stuck messages from dead consumers
-		reclaimThread = new Thread(this::reclaimLoop, "panako-redis-reclaim-" + workerMode);
-		reclaimThread.setDaemon(true);
-		reclaimThread.start();
-
-		// Build XREADGROUP map: each stream → ">" (only new undelivered messages)
-		Map<String, StreamEntryID> streamsMap = new HashMap<>();
-		for (String s : subscribedStreams) {
-			streamsMap.put(s, StreamEntryID.XREADGROUP_UNDELIVERED_ENTRY);
-		}
-
+		// Fresh and recovered messages share one synchronous execution path.
 		while (running) {
-			try (Jedis jedis = pool.getResource()) {
-				List<Map.Entry<String, List<StreamEntry>>> response = jedis.xreadGroup(
-						groupId, consumerName,
-						XReadGroupParams.xReadGroupParams().count(1).block((int) blockMs),
-						streamsMap);
-
-				if (response == null || response.isEmpty()) continue;
-
-				for (Map.Entry<String, List<StreamEntry>> streamEntries : response) {
-					String stream = streamEntries.getKey();
-					for (StreamEntry entry : streamEntries.getValue()) {
-						processEntry(jedis, stream, entry);
-					}
-				}
+			try {
+				dispatcher.processNext(this::processEntry);
 			} catch (Exception e) {
 				LOG.log(Level.WARNING, "Redis read loop error — will retry after 5s (worker stays alive)", e);
 				try { Thread.sleep(5000); } catch (InterruptedException ie) {
@@ -294,48 +273,8 @@ public class PanakoRedisStreamWorker implements Runnable {
 				sendError(responseStream, key, e.getMessage());
 			} catch (Exception sendErr) {
 				LOG.log(Level.WARNING, "Failed to send error response", sendErr);
+				throw new IllegalStateException("Failed to publish Redis error result", sendErr);
 			}
-		} finally {
-			try {
-				jedis.xack(stream, groupId, entry.getID());
-			} catch (Exception ackErr) {
-				LOG.log(Level.WARNING, "Failed to XACK " + entry.getID(), ackErr);
-			}
-		}
-	}
-
-	private void reclaimLoop() {
-		while (running) {
-			try {
-				Thread.sleep(60_000);
-				try (Jedis jedis = pool.getResource()) {
-					for (String stream : subscribedStreams) {
-						reclaimStuck(jedis, stream);
-					}
-				}
-			} catch (InterruptedException ie) {
-				Thread.currentThread().interrupt();
-				return;
-			} catch (Exception e) {
-				LOG.log(Level.FINE, "Reclaim loop iteration failed", e);
-			}
-		}
-	}
-
-	private void reclaimStuck(Jedis jedis, String stream) {
-		try {
-			Map.Entry<StreamEntryID, List<StreamEntry>> reclaimed = jedis.xautoclaim(
-					stream, groupId, consumerName, claimIdleMs, new StreamEntryID(0, 0),
-					XAutoClaimParams.xAutoClaimParams().count(10));
-
-			if (reclaimed == null || reclaimed.getValue() == null || reclaimed.getValue().isEmpty()) return;
-
-			LOG.info("Reclaimed " + reclaimed.getValue().size() + " stuck messages from '" + stream + "'");
-			for (StreamEntry entry : reclaimed.getValue()) {
-				processEntry(jedis, stream, entry);
-			}
-		} catch (Exception e) {
-			LOG.log(Level.FINE, "XAUTOCLAIM failed on " + stream, e);
 		}
 	}
 
@@ -523,7 +462,6 @@ public class PanakoRedisStreamWorker implements Runnable {
 
 			if (segments != null && !segments.isEmpty()) {
 				allResults = new ArrayList<>();
-				int skipped = 0;
 				for (int[] seg : segments) {
 					int segStart = seg[0];
 					int segDuration = seg[1] - seg[0];
@@ -541,15 +479,14 @@ public class PanakoRedisStreamWorker implements Runnable {
 									r.percentOfSecondsWithMatches));
 						}
 					} catch (IOException e) {
-						skipped++;
-						LOG.warning("Skipping refine segment [" + segStart + "-" + seg[1] + "s] for " + recordingId + ": " + e.getMessage());
+						throw new IOException("Failed refine segment [" + segStart + "-" + seg[1] + "s]", e);
 					} finally {
 						if (chunk != null) {
 							try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
 						}
 					}
 				}
-				LOG.info("Redis monitor (segments mode): " + segments.size() + " segments (" + skipped + " skipped) for " + recordingId);
+				LOG.info("Redis monitor (segments mode): " + segments.size() + " segments for " + recordingId);
 			} else {
 				allResults = MonitorHandler.monitorWithAbsoluteTimes(strategy, filePath);
 			}
@@ -558,7 +495,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 
 			String monitorJson = MonitorHandler.buildResponseJson(strategy, allResults, filePath, processingTimeMs);
 			String json = "{\"recording_id\":\"" + HttpUtil.escapeJson(recordingId != null ? recordingId : "") + "\"," +
-					"\"duration_seconds\":" + String.format("%.1f", totalDuration) + "," +
+					"\"duration_seconds\":" + HttpUtil.formatOneDecimal(totalDuration) + "," +
 					monitorJson.substring(1);
 
 			send(monitorResultStream, recordingId, json);
@@ -706,6 +643,7 @@ public class PanakoRedisStreamWorker implements Runnable {
 			jedis.xadd(stream, XAddParams.xAddParams().maxLen(100000).approximateTrimming(), fields);
 		} catch (Exception e) {
 			LOG.log(Level.SEVERE, "Failed to XADD to stream " + stream, e);
+			throw new IllegalStateException("Failed to publish Redis result", e);
 		}
 	}
 
@@ -801,8 +739,10 @@ public class PanakoRedisStreamWorker implements Runnable {
 		if (idx == -1) return null;
 		int colon = json.indexOf(':', idx + search.length());
 		if (colon == -1) return null;
-		int start = json.indexOf('"', colon + 1);
-		if (start == -1) return null;
+		int start = colon + 1;
+		while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
+		// A null/non-string value must not consume the following field's name.
+		if (start >= json.length() || json.charAt(start) != '"') return null;
 		start++;
 		int end = start;
 		while (end < json.length()) {

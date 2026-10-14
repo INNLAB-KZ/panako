@@ -206,6 +206,28 @@ Redis monitor workers resolve matching CDN URLs immediately before download. For
 while query parameters are omitted from logs. Failed origin downloads remove partial files and
 fall back once to original CDN URL when fallback is enabled.
 
+Redis workers execute fresh and reclaimed messages through the same serial dispatcher.
+Each worker owns at most one task at a time; reclaim does not create an extra processing
+thread. A heartbeat refreshes the active message's pending-entry idle time every
+`min(30 seconds, REDIS_CLAIM_IDLE_MS / 3)`. After a crash, heartbeats stop and another
+consumer can reclaim the message after the idle threshold. The Redis user needs
+permission for `EVAL`, `XPENDING`, `XCLAIM`, and `XAUTOCLAIM`, in addition to the existing
+stream commands. Connection pools allow at least three connections for processing,
+result publication, and heartbeat.
+
+This limit is per Redis worker, not per JVM: `REDIS_WORKER_THREADS`, both worker modes,
+Kafka consumers, and HTTP requests can add concurrent tasks. With one Redis worker,
+`MONITOR_PARALLEL_WINDOWS=2` permits two window tasks for that worker. Delivery remains
+at least once: process pauses, network outages, or a crash between result publication
+and acknowledgment can still cause retries.
+
+Window failures, cancellations, and timeouts invalidate the recording instead of returning
+partial success. Redis refine segment failures also return an error. Fatal JVM errors leave
+the input pending for recovery. Cancelled windows must exit before the worker starts another
+recording; a window that ignores interruption blocks that worker and logs a warning every
+30 seconds. Database hit objects are released incrementally during match conversion to
+reduce peak live memory; this does not impose a hard bound on query result size.
+
 See [API_README.md](API_README.md) for full API documentation and all configuration options.
 
 ## ClickHouse CLI

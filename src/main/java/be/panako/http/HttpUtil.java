@@ -90,6 +90,7 @@ public final class HttpUtil {
 			throw new IOException("HTTP " + status + " from " + redactUrl(urlString));
 		}
 
+		long expectedLength = conn.getContentLengthLong();
 		try (InputStream in = conn.getInputStream();
 			 OutputStream out = Files.newOutputStream(target)) {
 			byte[] buf = new byte[8192];
@@ -101,6 +102,13 @@ public final class HttpUtil {
 					throw new IOException("Download exceeds maximum size of " + (maxBytes / (1024 * 1024)) + " MB");
 				}
 				out.write(buf, 0, read);
+			}
+			if (total == 0) {
+				throw new IOException("Downloaded audio is empty");
+			}
+			if (expectedLength >= 0 && total != expectedLength) {
+				throw new IOException("Incomplete download: expected " + expectedLength
+						+ " bytes, received " + total);
 			}
 		} finally {
 			conn.disconnect();

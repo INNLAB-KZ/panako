@@ -34,7 +34,7 @@ public class PanakoHttpServer {
 
 	private static final int DEFAULT_PORT = 8080;
 	private static final int DEFAULT_THREAD_POOL_SIZE = 10;
-	private static final int DEFAULT_MAX_UPLOAD_SIZE_MB = 100;
+	private static final int DEFAULT_MAX_UPLOAD_SIZE_MB = 256;
 
 	private final int port;
 	private final int maxUploadSizeMB;
@@ -165,7 +165,7 @@ public class PanakoHttpServer {
 	 * <ul>
 	 *   <li>SERVER_PORT (default: 8080)</li>
 	 *   <li>SERVER_THREAD_POOL_SIZE (default: 10)</li>
-	 *   <li>SERVER_MAX_UPLOAD_SIZE_MB (default: 100)</li>
+	 *   <li>SERVER_MAX_UPLOAD_SIZE_MB (default: 256)</li>
 	 *   <li>STRATEGY (default: OLAF) — passed to Panako's Config</li>
 	 * </ul>
 	 */

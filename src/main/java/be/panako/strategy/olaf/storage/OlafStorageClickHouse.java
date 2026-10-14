@@ -62,7 +62,20 @@ public class OlafStorageClickHouse implements OlafStorage {
 	}
 
 	private Connection getConnection() throws SQLException {
-		return DriverManager.getConnection(jdbcUrl);
+		Properties properties = new Properties();
+		// JDBC v2 defaults socket_timeout to zero (unbounded). Thread interruption
+		// does not unblock a stalled HTTP response body, pinning a worker forever.
+		// These are millisecond inactivity limits, not a recording/query deadline.
+		// Explicit JDBC URL properties take precedence in driver 0.9.8.
+		properties.setProperty("socket_timeout", "60000");
+		properties.setProperty("connection_timeout", "5000");
+		properties.setProperty("connection_request_timeout", "5000");
+		// JDBC 0.9.8 fixes socket buffers at 804800 bytes, disabling Linux TCP
+		// autotuning. Host caps can reduce that further and limit distant reads.
+		// Zero leaves sizing to the OS in the driver's Apache HTTP transport.
+		properties.setProperty("socket_rcvbuf", "0");
+		properties.setProperty("socket_sndbuf", "0");
+		return DriverManager.getConnection(jdbcUrl, properties);
 	}
 
 	private void initSchema() {
@@ -256,6 +269,7 @@ public class OlafStorageClickHouse implements OlafStorage {
 			Set<Long> expandedHashes = new HashSet<>();
 			Map<Long, Long> nearToOriginal = new HashMap<>();
 			for (long queryHash : queue) {
+                checkQueryCancelled();
 				for (int delta = -range; delta <= range; delta++) {
 					long nearHash = queryHash + delta;
 					expandedHashes.add(nearHash);
@@ -270,6 +284,7 @@ public class OlafStorageClickHouse implements OlafStorage {
 			int batchSize = 1000;
 
 			for (int i = 0; i < hashList.size(); i += batchSize) {
+                checkQueryCancelled();
 				List<Long> batch = hashList.subList(i, Math.min(i + batchSize, hashList.size()));
 
 				StringBuilder sql = new StringBuilder("SELECT hash, resource_id, t1 FROM olaf_fingerprints WHERE hash IN (");
@@ -281,7 +296,9 @@ public class OlafStorageClickHouse implements OlafStorage {
 
 				try (Statement stmt = conn.createStatement();
 					 ResultSet rs = stmt.executeQuery(sql.toString())) {
+					int rowCount = 0;
 					while (rs.next()) {
+                        if ((rowCount++ & 1023) == 0) checkQueryCancelled();
 						long dbHash = rs.getLong("hash");
 						int resourceID = rs.getInt("resource_id");
 						int t1 = rs.getInt("t1");
@@ -296,12 +313,25 @@ public class OlafStorageClickHouse implements OlafStorage {
 					}
 				}
 			}
+            checkQueryCancelled();
 		} catch (SQLException e) {
 			LOG.log(Level.SEVERE, "Failed to process query queue", e);
+			// A failed batch invalidates the entire lookup, including earlier batches.
+			matchAccumulator.clear();
+			throw new IllegalStateException("Failed to query OLAF fingerprints", e);
+		} catch (RuntimeException e) {
+			matchAccumulator.clear();
+			throw e;
 		} finally {
 			queue.clear();
 		}
 	}
+
+    private static void checkQueryCancelled() {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new java.util.concurrent.CancellationException("OLAF query cancelled");
+        }
+    }
 
 	// ===================== DELETE =====================
 

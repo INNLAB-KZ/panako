@@ -155,7 +155,7 @@ public class PanakoKafkaWorker implements Runnable {
 	public PanakoKafkaWorker(Strategy strategy, ReentrantLock writeLock, int maxUploadSizeMB, String workerMode) {
 		this.strategy = strategy;
 		this.writeLock = writeLock;
-		this.maxBytes = maxUploadSizeMB * 1024L * 1024L;
+		this.maxBytes = (long) maxUploadSizeMB * 1024L * 1024L;
 
 		if (!MODE_STAGE1.equals(workerMode) && !MODE_REFINE.equals(workerMode)) {
 			throw new IllegalArgumentException("Worker instance mode must be '" + MODE_STAGE1
@@ -564,7 +564,7 @@ public class PanakoKafkaWorker implements Runnable {
 			String monitorJson = MonitorHandler.buildResponseJson(strategy, allResults, filePath, processingTimeMs);
 			// Inject recording_id and duration_seconds into the JSON
 			String json = "{\"recording_id\":\"" + HttpUtil.escapeJson(recordingId != null ? recordingId : "") + "\"," +
-					"\"duration_seconds\":" + String.format("%.1f", totalDuration) + "," +
+					"\"duration_seconds\":" + HttpUtil.formatOneDecimal(totalDuration) + "," +
 					monitorJson.substring(1);
 
 			send(monitorResultTopic, recordingId, json);

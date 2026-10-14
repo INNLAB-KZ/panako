@@ -338,54 +338,86 @@ public class MonitorHandler implements HttpHandler {
 				new java.util.concurrent.atomic.AtomicBoolean(false);
 
 		List<Future<?>> futures = new ArrayList<>();
-		for (int t : offsets) {
-			final int offset = t;
-			futures.add(executor.submit(() -> {
-				if (eofReached.get()) return;
-				Path chunk = null;
-				try {
-					chunk = extractAudioChunk(filePath, offset, stepSize);
-					long sz = Files.size(chunk);
-					if (sz < minChunkBytes) {
-						if (eofReached.compareAndSet(false, true)) {
-							LOG.info("EOF detected at t=" + offset + "s (chunk=" + sz + "B) — short-circuiting remaining windows");
+		try {
+			for (int t : offsets) {
+				final int offset = t;
+				futures.add(executor.submit(() -> {
+					if (eofReached.get()) return;
+					Path chunk = null;
+					try {
+						chunk = extractAudioChunk(filePath, offset, stepSize);
+						long sz = Files.size(chunk);
+						if (sz < minChunkBytes) {
+							if (eofReached.compareAndSet(false, true)) {
+								LOG.info("EOF detected at t=" + offset + "s (chunk=" + sz + "B) — short-circuiting remaining windows");
+							}
+							return;
 						}
-						return;
-					}
-					Strategy localStrategy = new OlafStrategy();
-					CollectingResultHandler handler = new CollectingResultHandler();
-					localStrategy.query(chunk.toAbsolutePath().toString(), maxResults, new HashSet<>(), handler);
+						Strategy localStrategy = new OlafStrategy();
+						CollectingResultHandler handler = new CollectingResultHandler();
+						localStrategy.query(chunk.toAbsolutePath().toString(), maxResults, new HashSet<>(), handler);
 
-					for (QueryResult r : handler.results) {
-						allResults.add(new QueryResult(
-								r.queryPath, r.queryStart + offset, r.queryStop + offset,
-								r.refPath, r.refIdentifier, r.refStart, r.refStop,
-								r.score, r.timeFactor, r.frequencyFactor,
-								r.percentOfSecondsWithMatches));
+						for (QueryResult r : handler.results) {
+							allResults.add(new QueryResult(
+									r.queryPath, r.queryStart + offset, r.queryStop + offset,
+									r.refPath, r.refIdentifier, r.refStart, r.refStop,
+									r.score, r.timeFactor, r.frequencyFactor,
+									r.percentOfSecondsWithMatches));
+						}
+					} catch (IOException e) {
+						throw new CompletionException("Failed to process window at offset " + offset, e);
+					} finally {
+						if (chunk != null) {
+							try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
+						}
 					}
-				} catch (IOException e) {
-					LOG.log(Level.WARNING, "Failed to process window at offset " + offset, e);
-				} finally {
-					if (chunk != null) {
-						try { Files.deleteIfExists(chunk); } catch (IOException ignored) {}
-					}
-				}
-			}));
+				}));
+			}
+
+			long perFutureTimeoutSec = Math.min(600L, Math.max(60L, stepSize * 4L + 30L));
+			awaitWindowTasks(futures, perFutureTimeoutSec, TimeUnit.SECONDS);
+		} finally {
+			stopWindowTasks(executor, futures);
 		}
+		return allResults;
+	}
 
-		for (Future<?> f : futures) {
+	/** A failed window invalidates the recording; never publish partial success. */
+	static void awaitWindowTasks(List<? extends Future<?>> futures, long timeout, TimeUnit unit)
+			throws IOException {
+		for (Future<?> future : futures) {
 			try {
-				f.get();
+				future.get(timeout, unit);
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
-				break;
+				throw new IOException("Window processing interrupted", e);
 			} catch (ExecutionException e) {
-				LOG.log(Level.WARNING, "Window processing failed", e.getCause());
+				if (e.getCause() instanceof Error) throw (Error) e.getCause();
+				throw new IOException("Window processing failed", e.getCause());
+			} catch (TimeoutException | CancellationException e) {
+				throw new IOException("Window processing timed out or was cancelled", e);
 			}
 		}
-		executor.shutdown();
+	}
 
-		return allResults;
+	/** Do not admit the next recording until cancelled workers actually exit. */
+	static void stopWindowTasks(ExecutorService executor, List<? extends Future<?>> futures) {
+		for (Future<?> future : futures) future.cancel(true);
+		executor.shutdownNow();
+		boolean interrupted = Thread.interrupted();
+		try {
+			while (!executor.isTerminated()) {
+				try {
+					if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+						LOG.warning("Waiting for cancelled windows to exit; next recording remains blocked");
+					}
+				} catch (InterruptedException e) {
+					interrupted = true;
+				}
+			}
+		} finally {
+			if (interrupted) Thread.currentThread().interrupt();
+		}
 	}
 
 	/**
@@ -479,7 +511,7 @@ public class MonitorHandler implements HttpHandler {
 		Path chunk = Files.createTempFile("panako_chunk_", ".wav");
 		ProcessBuilder pb = new ProcessBuilder(
 				"ffmpeg", "-y",
-				"-ss", String.format("%.2f", offsetSec),
+				"-ss", String.format(Locale.ROOT, "%.2f", offsetSec),
 				"-t", String.valueOf(durationSec),
 				"-i", filePath,
 				"-ar", String.valueOf(sampleRate),
@@ -666,16 +698,16 @@ public class MonitorHandler implements HttpHandler {
 			json.append("\"filename\":\"").append(HttpUtil.escapeJson(m.filename)).append("\",");
 			json.append("\"title\":").append(StoreFingerprintsHandler.jsonNullableString(m.title)).append(",");
 			json.append("\"audio_url\":").append(StoreFingerprintsHandler.jsonNullableString(m.audioUrl)).append(",");
-			json.append("\"query_start_seconds\":").append(String.format("%.1f", m.queryStart)).append(",");
+			json.append("\"query_start_seconds\":").append(String.format(Locale.ROOT, "%.1f", m.queryStart)).append(",");
 			json.append("\"query_start_time\":\"").append(formatTime(m.queryStart)).append("\",");
-			json.append("\"query_end_seconds\":").append(String.format("%.1f", m.queryEnd)).append(",");
+			json.append("\"query_end_seconds\":").append(String.format(Locale.ROOT, "%.1f", m.queryEnd)).append(",");
 			json.append("\"query_end_time\":\"").append(formatTime(m.queryEnd)).append("\",");
-			json.append("\"match_start_seconds\":").append(String.format("%.1f", m.refStart)).append(",");
-			json.append("\"match_end_seconds\":").append(String.format("%.1f", m.refEnd)).append(",");
+			json.append("\"match_start_seconds\":").append(String.format(Locale.ROOT, "%.1f", m.refStart)).append(",");
+			json.append("\"match_end_seconds\":").append(String.format(Locale.ROOT, "%.1f", m.refEnd)).append(",");
 			json.append("\"score\":").append(m.score).append(",");
-			json.append("\"time_factor\":").append(String.format("%.3f", m.timeFactor)).append(",");
-			json.append("\"frequency_factor\":").append(String.format("%.3f", m.frequencyFactor)).append(",");
-			json.append("\"match_percentage\":").append(String.format("%.1f", m.matchPercentage)).append(",");
+			json.append("\"time_factor\":").append(String.format(Locale.ROOT, "%.3f", m.timeFactor)).append(",");
+			json.append("\"frequency_factor\":").append(String.format(Locale.ROOT, "%.3f", m.frequencyFactor)).append(",");
+			json.append("\"match_percentage\":").append(String.format(Locale.ROOT, "%.1f", m.matchPercentage)).append(",");
 			json.append("\"window_hits\":").append(m.windowHits).append(",");
 			// Per-occurrence breakdown. One entry per contiguous play of the
 			// track — if the same track plays twice on a recording with a gap,
@@ -686,10 +718,10 @@ public class MonitorHandler implements HttpHandler {
 				MatchWindow w = m.windows.get(wi);
 				if (wi > 0) json.append(",");
 				json.append("{");
-				json.append("\"query_start_seconds\":").append(String.format("%.1f", w.queryStart)).append(",");
-				json.append("\"query_end_seconds\":").append(String.format("%.1f", w.queryEnd)).append(",");
-				json.append("\"match_start_seconds\":").append(String.format("%.1f", w.refStart)).append(",");
-				json.append("\"match_end_seconds\":").append(String.format("%.1f", w.refEnd)).append(",");
+				json.append("\"query_start_seconds\":").append(String.format(Locale.ROOT, "%.1f", w.queryStart)).append(",");
+				json.append("\"query_end_seconds\":").append(String.format(Locale.ROOT, "%.1f", w.queryEnd)).append(",");
+				json.append("\"match_start_seconds\":").append(String.format(Locale.ROOT, "%.1f", w.refStart)).append(",");
+				json.append("\"match_end_seconds\":").append(String.format(Locale.ROOT, "%.1f", w.refEnd)).append(",");
 				json.append("\"score\":").append(w.score).append(",");
 				json.append("\"window_hits\":").append(w.windowHits);
 				json.append("}");
@@ -707,7 +739,7 @@ public class MonitorHandler implements HttpHandler {
 				float[] waveform = extractWaveform(recordingPath);
 				for (int i = 0; i < waveform.length; i++) {
 					if (i > 0) json.append(",");
-					json.append(String.format("%.3f", waveform[i]));
+					json.append(String.format(Locale.ROOT, "%.3f", waveform[i]));
 				}
 			} catch (Exception e) {
 				LOG.log(Level.WARNING, "Waveform extraction failed: " + e.getMessage());
@@ -727,7 +759,7 @@ public class MonitorHandler implements HttpHandler {
 		int hours = total / 3600;
 		int minutes = (total % 3600) / 60;
 		int seconds = total % 60;
-		return String.format("%02d:%02d:%02d", hours, minutes, seconds);
+		return String.format(Locale.ROOT, "%02d:%02d:%02d", hours, minutes, seconds);
 	}
 
 	/**
@@ -890,7 +922,7 @@ public class MonitorHandler implements HttpHandler {
 			if (bestQueryStart < w.queryStart) {
 				w.queryStart = bestQueryStart;
 				w.refStart = bestRefStart;
-				LOG.info(String.format("Refined START for %s: query_start=%.1f, match_start=%.1f",
+				LOG.info(String.format(Locale.ROOT, "Refined START for %s: query_start=%.1f, match_start=%.1f",
 						targetId, w.queryStart, w.refStart));
 			}
 		}
@@ -936,7 +968,7 @@ public class MonitorHandler implements HttpHandler {
 			if (bestQueryEnd > w.queryEnd) {
 				w.queryEnd = bestQueryEnd;
 				w.refEnd = bestRefEnd;
-				LOG.info(String.format("Refined END for %s: query_end=%.1f, match_end=%.1f",
+				LOG.info(String.format(Locale.ROOT, "Refined END for %s: query_end=%.1f, match_end=%.1f",
 						targetId, w.queryEnd, w.refEnd));
 			}
 		}
