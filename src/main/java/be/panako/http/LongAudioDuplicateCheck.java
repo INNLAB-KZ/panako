@@ -3,6 +3,7 @@ package be.panako.http;
 import be.panako.strategy.QueryResult;
 import be.panako.strategy.QueryResultHandler;
 import be.panako.strategy.Strategy;
+import be.panako.strategy.olaf.OlafStrategy;
 import be.panako.util.Config;
 import be.panako.util.Key;
 
@@ -105,7 +106,11 @@ final class LongAudioDuplicateCheck {
 		}
 		if (candidates == null) return null;
 		for (QueryResult candidate : candidates.values()) {
-			double[] reference = HttpUtil.parseMetadata(strategy.metadata(candidate.refPath));
+			// A metadata rename preserves resource_id but can change the path hash.
+			String metadata = strategy instanceof OlafStrategy
+					? ((OlafStrategy) strategy).metadataByIdentifier(Long.parseLong(candidate.refIdentifier))
+					: strategy.metadata(candidate.refPath);
+			double[] reference = HttpUtil.parseMetadata(metadata);
 			if (reference != null && Math.abs(reference[0] - duration) <= 5) return candidate;
 		}
 		return null;

@@ -64,6 +64,11 @@ class OlafChunkedStoreTest {
 				String.valueOf(FileUtils.getIdentifier(track.toString())).equals(result.refIdentifier)
 						&& result.refStart >= 292 && result.refStart <= 302),
 				"Expected match around original 300-second boundary");
+		// Renames change the display path, not the indexed resource identity.
+		metadata.path = directory.resolve("renamed-track.wav").toString();
+		assertNull(strategy.metadata(metadata.path));
+		assertNull(strategy.metadataByIdentifier(-987654321));
+		assertNotNull(strategy.metadataByIdentifier(metadata.identifier));
 		QueryResult duplicate = LongAudioDuplicateCheck.find(
 				strategy, new MatchValidator(), track.toString(), 305);
 		assertNotNull(duplicate);

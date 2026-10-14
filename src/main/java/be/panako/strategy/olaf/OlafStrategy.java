@@ -771,9 +771,17 @@ public class OlafStrategy extends Strategy {
 
 	@Override
 	public String metadata(String path) {
-		final OlafStorage db = getStorage();
-		long identifier = FileUtils.getIdentifier(path);
-		OlafResourceMetadata metaData = db.getMetadata(identifier);
+		return metadataByIdentifier(FileUtils.getIdentifier(path));
+	}
+
+	/**
+	 * Look up the stored identity directly; renamed paths need not hash to that identity.
+	 * @param identifier the resource ID returned by a query
+	 * @return formatted metadata, or null when the resource no longer exists
+	 */
+	public String metadataByIdentifier(long identifier) {
+		OlafResourceMetadata metaData = getStorage().getMetadata(identifier);
+		if (metaData == null) return null;
 		return String.format(Locale.ROOT, "%d ; %s ; %.3f (s) ; %d (#) ; %.3f (#/s)",metaData.identifier,metaData.path,metaData.duration,metaData.numFingerprints,metaData.printsPerSecond());
 	}
 }
