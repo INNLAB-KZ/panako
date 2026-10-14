@@ -1,0 +1,12 @@
+{
+  "phase": "failed",
+  "production_queues_untouched": true,
+  "started_at": "2026-09-29T08:41:55.505728+00:00",
+  "audio_sha256": "2cd4146d342ff89c9d822a8575a80933174d361c1de7d67b34081e6213f96e16",
+  "container_id": "ef7cdc4c4e72528b42663619ef99296cca84278820cd0f12e26213a1b25ed719",
+  "elapsed_seconds": 501,
+  "exit_code": 3,
+  "oom_killed": false,
+  "java_heap_oom": true,
+  "finished_at": "2026-09-29T08:50:28.492254+00:00"
+}

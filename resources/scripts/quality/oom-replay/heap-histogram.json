@@ -1,0 +1,185 @@
+{
+  "id_bytes": 8,
+  "top_by_count": [
+    {
+      "class": "java/lang/Long",
+      "objects": 44721794,
+      "serialized_field_bytes": 357774352,
+      "hprof_instance_size": 8
+    },
+    {
+      "class": "be/panako/strategy/olaf/storage/OlafHit",
+      "objects": 34976416,
+      "serialized_field_bytes": 839433984,
+      "hprof_instance_size": 24
+    },
+    {
+      "class": "java/util/HashMap$TreeNode",
+      "objects": 11295726,
+      "serialized_field_bytes": 869770902,
+      "hprof_instance_size": 77
+    },
+    {
+      "class": "java/util/HashMap$Node",
+      "objects": 3639579,
+      "serialized_field_bytes": 101908212,
+      "hprof_instance_size": 28
+    },
+    {
+      "class": "be/panako/strategy/olaf/OlafFingerprint",
+      "objects": 2391747,
+      "serialized_field_bytes": 105236868,
+      "hprof_instance_size": 44
+    },
+    {
+      "class": "[Ljava/lang/Object;",
+      "objects": 580807,
+      "serialized_field_bytes": 535412960,
+      "hprof_instance_size": 0
+    },
+    {
+      "class": "java/util/ArrayList",
+      "objects": 578360,
+      "serialized_field_bytes": 9253760,
+      "hprof_instance_size": 16
+    },
+    {
+      "class": "primitive_array_8",
+      "objects": 32436,
+      "serialized_field_bytes": 4236485,
+      "hprof_instance_size": null
+    },
+    {
+      "class": "java/lang/String",
+      "objects": 31558,
+      "serialized_field_bytes": 441812,
+      "hprof_instance_size": 14
+    },
+    {
+      "class": "java/util/concurrent/ConcurrentHashMap$Node",
+      "objects": 17511,
+      "serialized_field_bytes": 490308,
+      "hprof_instance_size": 28
+    },
+    {
+      "class": "sun/util/locale/LocaleObjectCache$CacheEntry",
+      "objects": 1985,
+      "serialized_field_bytes": 95280,
+      "hprof_instance_size": 48
+    },
+    {
+      "class": "java/lang/Object",
+      "objects": 1812,
+      "serialized_field_bytes": 0,
+      "hprof_instance_size": 0
+    },
+    {
+      "class": "java/util/TreeMap$Entry",
+      "objects": 1447,
+      "serialized_field_bytes": 59327,
+      "hprof_instance_size": 41
+    },
+    {
+      "class": "java/lang/ref/SoftReference",
+      "objects": 1336,
+      "serialized_field_bytes": 53440,
+      "hprof_instance_size": 40
+    },
+    {
+      "class": "primitive_array_10",
+      "objects": 1144,
+      "serialized_field_bytes": 358048,
+      "hprof_instance_size": null
+    },
+    {
+      "class": "sun/util/locale/BaseLocale",
+      "objects": 1011,
+      "serialized_field_bytes": 36396,
+      "hprof_instance_size": 36
+    },
+    {
+      "class": "sun/util/locale/BaseLocale$Key",
+      "objects": 992,
+      "serialized_field_bytes": 20832,
+      "hprof_instance_size": 21
+    },
+    {
+      "class": "java/lang/invoke/MethodType$ConcurrentWeakInternSet$WeakEntry",
+      "objects": 709,
+      "serialized_field_bytes": 25524,
+      "hprof_instance_size": 36
+    },
+    {
+      "class": "java/lang/invoke/MethodType",
+      "objects": 706,
+      "serialized_field_bytes": 33888,
+      "hprof_instance_size": 48
+    },
+    {
+      "class": "[Ljava/lang/String;",
+      "objects": 694,
+      "serialized_field_bytes": 27032,
+      "hprof_instance_size": 0
+    },
+    {
+      "class": "java/lang/invoke/MemberName",
+      "objects": 665,
+      "serialized_field_bytes": 29260,
+      "hprof_instance_size": 44
+    },
+    {
+      "class": "[Ljava/lang/Class;",
+      "objects": 579,
+      "serialized_field_bytes": 15336,
+      "hprof_instance_size": 0
+    },
+    {
+      "class": "java/lang/invoke/ResolvedMethodName",
+      "objects": 509,
+      "serialized_field_bytes": 0,
+      "hprof_instance_size": 0
+    },
+    {
+      "class": "java/util/LinkedHashMap$Entry",
+      "objects": 454,
+      "serialized_field_bytes": 19976,
+      "hprof_instance_size": 44
+    },
+    {
+      "class": "java/lang/Integer",
+      "objects": 417,
+      "serialized_field_bytes": 1668,
+      "hprof_instance_size": 4
+    },
+    {
+      "class": "java/lang/invoke/LambdaForm$Name",
+      "objects": 398,
+      "serialized_field_bytes": 13532,
+      "hprof_instance_size": 34
+    },
+    {
+      "class": "[Ljava/lang/ref/SoftReference;",
+      "objects": 362,
+      "serialized_field_bytes": 40992,
+      "hprof_instance_size": 0
+    },
+    {
+      "class": "java/util/HashMap",
+      "objects": 358,
+      "serialized_field_bytes": 17184,
+      "hprof_instance_size": 48
+    },
+    {
+      "class": "[Ljava/util/HashMap$Node;",
+      "objects": 355,
+      "serialized_field_bytes": 176302368,
+      "hprof_instance_size": 0
+    },
+    {
+      "class": "jdk/internal/math/FDBigInteger",
+      "objects": 341,
+      "serialized_field_bytes": 5797,
+      "hprof_instance_size": 17
+    }
+  ]
+}

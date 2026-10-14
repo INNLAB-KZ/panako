@@ -1,0 +1,52 @@
+{
+  "phase": "passed",
+  "production_untouched": true,
+  "ch_start": "1f908011d5a96b6feb88f73927ad8a1e8a2b46f2c728f1b6dce445acfaf78b5d 2026-09-29T08:29:49.841332319Z",
+  "ch_version": "26.3.12.3",
+  "initial_write": {
+    "recovery_seconds": 0.485,
+    "attempt_errors": [],
+    "replica_state": "{\"is_readonly\":0,\"is_session_expired\":0,\"queue_size\":0}",
+    "connection": "{\"name\":\"default\",\"host\":\"keeper-main-test\",\"port\":9181,\"index\":0,\"connected_time\":\"2026-09-29 08:29:51\",\"session_uptime_elapsed_seconds\":1,\"is_expired\":0,\"keeper_api_version\":0,\"client_id\":3,\"xid\":88,\"enabled_feature_flags\":[\"FILTERED_LIST\",\"MULTI_READ\",\"CHECK_NOT_EXISTS\",\"CREATE_IF_NOT_EXISTS\",\"REMOVE_RECURSIVE\",\"MULTI_WATCHES\",\"CHECK_STAT\",\"PERSISTENT_WATCHES\",\"TRY_REMOVE\",\"LIST_WITH_STAT_AND_DATA\"],\"availability_zone\":\"\",\"session_timeout_ms\":30000,\"last_zxid_seen\":39}"
+  },
+  "two_members": "server.1=localhost:9234;participant;1\nserver.4=keeper-main-test:19234;participant;1",
+  "endpoint_reload_before_old_removal": {
+    "recovery_seconds": 0.541,
+    "attempt_errors": [],
+    "replica_state": "{\"is_readonly\":0,\"is_session_expired\":0,\"queue_size\":0}",
+    "connection": "{\"name\":\"default\",\"host\":\"keeper-main-test\",\"port\":19181,\"index\":0,\"connected_time\":\"2026-09-29 08:30:10\",\"session_uptime_elapsed_seconds\":0,\"is_expired\":0,\"keeper_api_version\":0,\"client_id\":9,\"xid\":42,\"enabled_feature_flags\":[\"FILTERED_LIST\",\"MULTI_READ\",\"CHECK_NOT_EXISTS\",\"CREATE_IF_NOT_EXISTS\",\"REMOVE_RECURSIVE\",\"MULTI_WATCHES\",\"CHECK_STAT\",\"PERSISTENT_WATCHES\",\"TRY_REMOVE\",\"LIST_WITH_STAT_AND_DATA\"],\"availability_zone\":\"\",\"session_timeout_ms\":30000,\"last_zxid_seen\":60}"
+  },
+  "new_single_member": "server.4=keeper-main-test:19234;participant;1",
+  "after_legacy_removal": {
+    "recovery_seconds": 0.427,
+    "attempt_errors": [],
+    "replica_state": "{\"is_readonly\":0,\"is_session_expired\":0,\"queue_size\":0}",
+    "connection": "{\"name\":\"default\",\"host\":\"keeper-main-test\",\"port\":19181,\"index\":0,\"connected_time\":\"2026-09-29 08:30:32\",\"session_uptime_elapsed_seconds\":0,\"is_expired\":0,\"keeper_api_version\":0,\"client_id\":22,\"xid\":43,\"enabled_feature_flags\":[\"FILTERED_LIST\",\"MULTI_READ\",\"CHECK_NOT_EXISTS\",\"CREATE_IF_NOT_EXISTS\",\"REMOVE_RECURSIVE\",\"MULTI_WATCHES\",\"CHECK_STAT\",\"PERSISTENT_WATCHES\",\"TRY_REMOVE\",\"LIST_WITH_STAT_AND_DATA\"],\"availability_zone\":\"\",\"session_timeout_ms\":30000,\"last_zxid_seen\":88}"
+  },
+  "membership_after_2": "server.4=keeper-main-test:19234;participant;1\nserver.2=keeper-two-test:9234;participant;1",
+  "membership_after_3": "server.4=keeper-main-test:19234;participant;1\nserver.2=keeper-two-test:9234;participant;1\nserver.3=keeper-three-test:9234;participant;1",
+  "final_config_reload": {
+    "recovery_seconds": 0.478,
+    "attempt_errors": [],
+    "replica_state": "{\"is_readonly\":0,\"is_session_expired\":0,\"queue_size\":0}",
+    "connection": "{\"name\":\"default\",\"host\":\"keeper-three-test\",\"port\":9181,\"index\":2,\"connected_time\":\"2026-09-29 08:30:44\",\"session_uptime_elapsed_seconds\":0,\"is_expired\":0,\"keeper_api_version\":0,\"client_id\":32,\"xid\":41,\"enabled_feature_flags\":[\"FILTERED_LIST\",\"MULTI_READ\",\"CHECK_NOT_EXISTS\",\"CREATE_IF_NOT_EXISTS\",\"REMOVE_RECURSIVE\",\"MULTI_WATCHES\",\"CHECK_STAT\",\"PERSISTENT_WATCHES\",\"TRY_REMOVE\",\"LIST_WITH_STAT_AND_DATA\"],\"availability_zone\":\"\",\"session_timeout_ms\":30000,\"last_zxid_seen\":112}"
+  },
+  "stopped_connected_keeper": 3,
+  "after_connected_keeper_stop": {
+    "recovery_seconds": 0.463,
+    "attempt_errors": [],
+    "replica_state": "{\"is_readonly\":0,\"is_session_expired\":0,\"queue_size\":0}",
+    "connection": "{\"name\":\"default\",\"host\":\"keeper-main-test\",\"port\":19181,\"index\":0,\"connected_time\":\"2026-09-29 08:30:48\",\"session_uptime_elapsed_seconds\":0,\"is_expired\":0,\"keeper_api_version\":0,\"client_id\":33,\"xid\":44,\"enabled_feature_flags\":[\"FILTERED_LIST\",\"MULTI_READ\",\"CHECK_NOT_EXISTS\",\"CREATE_IF_NOT_EXISTS\",\"REMOVE_RECURSIVE\",\"MULTI_WATCHES\",\"CHECK_STAT\",\"PERSISTENT_WATCHES\",\"TRY_REMOVE\",\"LIST_WITH_STAT_AND_DATA\"],\"availability_zone\":\"\",\"session_timeout_ms\":30000,\"last_zxid_seen\":121}"
+  },
+  "after_main_stop": {
+    "recovery_seconds": 0.45,
+    "attempt_errors": [],
+    "replica_state": "{\"is_readonly\":0,\"is_session_expired\":0,\"queue_size\":0}",
+    "connection": "{\"name\":\"default\",\"host\":\"keeper-two-test\",\"port\":9181,\"index\":1,\"connected_time\":\"2026-09-29 08:30:52\",\"session_uptime_elapsed_seconds\":0,\"is_expired\":0,\"keeper_api_version\":0,\"client_id\":35,\"xid\":86,\"enabled_feature_flags\":[\"FILTERED_LIST\",\"MULTI_READ\",\"CHECK_NOT_EXISTS\",\"CREATE_IF_NOT_EXISTS\",\"REMOVE_RECURSIVE\",\"MULTI_WATCHES\",\"CHECK_STAT\",\"PERSISTENT_WATCHES\",\"TRY_REMOVE\",\"LIST_WITH_STAT_AND_DATA\"],\"availability_zone\":\"\",\"session_timeout_ms\":30000,\"last_zxid_seen\":142}"
+  },
+  "clickhouse_not_restarted": true,
+  "read_after_main_keeper_stop": "retained_value",
+  "write_after_main_keeper_stop": "writable",
+  "finished_at": "2026-09-29T08:30:54.597223+00:00",
+  "containers_stopped": true
+}

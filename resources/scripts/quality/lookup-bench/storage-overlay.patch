@@ -1,0 +1,73 @@
+--- src/main/java/be/panako/strategy/olaf/storage/OlafStorageClickHouse.java
++++ benchmark/OlafStorageClickHouse.java
+@@ -51,7 +51,7 @@
+ 
+ 	private OlafStorageClickHouse() {
+ 		this.jdbcUrl = Config.get(Key.OLAF_CLICKHOUSE_URL);
+-		initSchema();
++		// Benchmark reads existing schema only.
+ 	}
+ 
+ 	public static synchronized OlafStorageClickHouse getInstance() {
+@@ -251,7 +251,9 @@
+ 		List<Long> queue = queryQueue.get();
+ 		if (queue.isEmpty()) return;
+ 
++		long began=System.nanoTime(), connect=0, expand=0, execute=0, next=0, map=0, rows=0; int batches=0; boolean ok=false;
+ 		try (Connection conn = getConnection()) {
++			connect=System.nanoTime()-began; long expandedAt=System.nanoTime();
+ 			// Build IN clause with hash range expansion
+ 			Set<Long> expandedHashes = new HashSet<>();
+ 			Map<Long, Long> nearToOriginal = new HashMap<>();
+@@ -268,37 +270,45 @@
+ 			// 1000 keeps bloom effective and brings p99 from ~18s down to ~2s.
+ 			List<Long> hashList = new ArrayList<>(expandedHashes);
+ 			int batchSize = 1000;
++			if (Boolean.parseBoolean(System.getenv("BENCH_SORT_HASHES"))) Collections.sort(hashList);
++			expand=System.nanoTime()-expandedAt;
+ 
+ 			for (int i = 0; i < hashList.size(); i += batchSize) {
+ 				List<Long> batch = hashList.subList(i, Math.min(i + batchSize, hashList.size()));
+ 
+-				StringBuilder sql = new StringBuilder("SELECT hash, resource_id, t1 FROM olaf_fingerprints WHERE hash IN (");
++				StringBuilder sql = new StringBuilder("/* lookup_bench_20260929_" + (Boolean.parseBoolean(System.getenv("BENCH_SORT_HASHES")) ? "sorted" : "baseline") + " */ SELECT hash, resource_id, t1 FROM olaf_fingerprints WHERE hash IN (");
+ 				for (int j = 0; j < batch.size(); j++) {
+ 					if (j > 0) sql.append(",");
+ 					sql.append(batch.get(j));
+ 				}
+ 				sql.append(")");
+ 
++				batches++; long executeAt=System.nanoTime();
+ 				try (Statement stmt = conn.createStatement();
+ 					 ResultSet rs = stmt.executeQuery(sql.toString())) {
+-					while (rs.next()) {
++					execute += System.nanoTime()-executeAt;
++					while (true) {
++						long nextAt=System.nanoTime(); boolean has=rs.next(); next+=System.nanoTime()-nextAt; if (!has) break; rows++; long mapAt=System.nanoTime();
+ 						long dbHash = rs.getLong("hash");
+ 						int resourceID = rs.getInt("resource_id");
+ 						int t1 = rs.getInt("t1");
+ 
+-						if (resourcesToAvoid.contains(resourceID)) continue;
++						if (resourcesToAvoid.contains(resourceID)) { map+=System.nanoTime()-mapAt; continue; }
+ 
+ 						Long originalHash = nearToOriginal.get(dbHash);
+-						if (originalHash == null) continue;
++						if (originalHash == null) { map+=System.nanoTime()-mapAt; continue; }
+ 
+ 						OlafHit hit = new OlafHit(originalHash, dbHash, t1, resourceID);
+ 						matchAccumulator.computeIfAbsent(originalHash, k -> new ArrayList<>()).add(hit);
++						map+=System.nanoTime()-mapAt;
+ 					}
+ 				}
+ 			}
+-		} catch (SQLException e) {
+-			LOG.log(Level.SEVERE, "Failed to process query queue", e);
++			ok=true;
++		} catch (SQLException e) {
++			throw new IllegalStateException("Benchmark query failed", e);
+ 		} finally {
++			System.out.printf(Locale.ROOT, "BENCH_LOOKUP ok=%s sorted=%s batches=%d rows=%d connect_ms=%.3f expand_ms=%.3f execute_ms=%.3f next_ms=%.3f map_ms=%.3f total_ms=%.3f%n", ok, System.getenv("BENCH_SORT_HASHES"), batches, rows, connect/1e6, expand/1e6, execute/1e6, next/1e6, map/1e6, (System.nanoTime()-began)/1e6);
+ 			queue.clear();
+ 		}
+ 	}
