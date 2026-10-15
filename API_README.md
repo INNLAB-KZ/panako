@@ -471,7 +471,7 @@ curl -X POST http://localhost:8080/api/v1/delete -F "audio=@USRC17607839.mp3"
 
 ### `POST /api/v1/delete/by_id`
 
-Delete fingerprints **and** metadata for a known `resource_id` without needing the original audio file. Accepts `application/json`.
+Delete fingerprints **and** metadata for a known `resource_id` without needing the original audio file. Accepts `application/json`. It is `delete/by_ids` with one id.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/delete/by_id \
@@ -491,21 +491,38 @@ Response (HTTP 200):
 }
 ```
 
-`rows_deleted` is the combined row count (fingerprints + metadata) that existed prior to the call.
+`rows_deleted` has the same meaning as in `delete/by_ids`.
 
-Notes:
-- Only supported on ClickHouse storage. LMDB backends store path inside the metadata blob — use `/api/v1/delete` with the original audio file instead.
-- Implementation: issues lightweight `DELETE FROM olaf_fingerprints WHERE resource_id = ?` plus `DELETE FROM olaf_metadata WHERE resource_id = ?`. The deletion replicates through ClickHouse Keeper to every replica automatically.
+### `POST /api/v1/delete/by_ids`
 
-Response:
+Delete fingerprints and metadata of up to 100 `resource_id`s in one call. Use it to remove wrong audio. It does not check duplicate pairs and does not write to the duplicate deletion log; use `POST /api/v1/duplicates/delete` for duplicates. OLAF + ClickHouse only.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/delete/by_ids \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"identifiers": [1075536417, 1087869885]}'
+```
+
+- `identifiers` — required, 1 to 100 resource ids. An empty list, more than 100 ids or a non-numeric id gives HTTP 400.
+
+Response (HTTP 200):
 
 ```json
 {
   "status": "ok",
-  "identifier": 1612789453,
-  "deleted": true
+  "rows_deleted": {"1075536417": 14120, "1087869885": 0}
 }
 ```
+
+- Keys are the ids as strings. The value is the fingerprint count recorded in the track metadata at store time. `0` means the id has no metadata: it is already deleted or never existed. Fingerprint rows without metadata are still deleted, but they count as `0`.
+- A repeated call with the same ids returns `200` with every value `0`.
+- HTTP 500 with the ClickHouse error in `message` means the call failed. Nothing is reported as deleted; retry the same ids. A failure can leave the metadata deleted and the fingerprints in place; the retry queues the fingerprint delete again.
+
+How the delete runs:
+- `olaf_fingerprints` is sorted by `hash`, so a delete by `resource_id` cannot use the index. A lightweight delete is a mutation that rewrites the row mask of the whole table, which takes minutes on production. One call issues one statement per table, never one per id.
+- The metadata delete is synchronous (`lightweight_deletes_sync = 2`, all replicas, at most 45 s). Query and monitor drop matches of tracks without metadata, so deleted ids stop matching when the call returns. `/api/v1/stats` shows the lower `audio_items_count` at once.
+- The fingerprint delete is queued (`lightweight_deletes_sync = 0`) and the call does not wait for it. `fingerprint_count` in `/api/v1/stats` drops when ClickHouse finishes the mutation. Pending mutations are applied together in one pass. Follow them with `SELECT mutation_id, is_done, parts_to_do FROM system.mutations WHERE table = 'olaf_fingerprints' AND NOT is_done`. Rows stored after the call, for example a corrected re-store of the same id, are not affected.
+- Each call adds two mutations, one per table. ClickHouse delays new mutations at 500 unfinished ones and rejects them at 1000 (`number_of_mutations_to_delay` / `number_of_mutations_to_throw`). Send large clean-ups in batches of 100 ids, for example 56 calls for 5 600 ids, and do not send single-id calls in a loop.
 
 ### Duplicate tracks: `/api/v1/duplicates`
 

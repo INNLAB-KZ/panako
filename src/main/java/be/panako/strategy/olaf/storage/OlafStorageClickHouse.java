@@ -183,42 +183,15 @@ public class OlafStorageClickHouse implements OlafStorage {
 
 	/**
 	 * Delete all rows for {@code resourceID} from both {@code olaf_fingerprints}
-	 * and {@code olaf_metadata}. Uses ClickHouse lightweight {@code DELETE} which
-	 * marks rows for removal and is replicated through Keeper to every replica.
+	 * and {@code olaf_metadata}; see {@link #deleteByResourceIds}.
 	 *
-	 * <p>Returns the row count that existed prior to deletion (sum of fingerprint
-	 * rows + metadata rows). Returns {@code -1} on SQL error.</p>
+	 * <p>Returns the fingerprint count recorded in the metadata before deletion,
+	 * or {@code -1} on SQL error.</p>
 	 */
 	public long deleteByResourceId(long resourceID) {
-		try (Connection conn = getConnection()) {
-			long fpCount;
-			long metaCount;
-			try (PreparedStatement count = conn.prepareStatement(
-					"SELECT count() FROM olaf_fingerprints WHERE resource_id = ?")) {
-				count.setLong(1, resourceID);
-				try (ResultSet rs = count.executeQuery()) {
-					fpCount = rs.next() ? rs.getLong(1) : 0;
-				}
-			}
-			try (PreparedStatement count = conn.prepareStatement(
-					"SELECT count() FROM olaf_metadata FINAL WHERE resource_id = ?")) {
-				count.setLong(1, resourceID);
-				try (ResultSet rs = count.executeQuery()) {
-					metaCount = rs.next() ? rs.getLong(1) : 0;
-				}
-			}
-			try (PreparedStatement del = conn.prepareStatement(
-					"DELETE FROM olaf_fingerprints WHERE resource_id = ?")) {
-				del.setLong(1, resourceID);
-				del.executeUpdate();
-			}
-			try (PreparedStatement del = conn.prepareStatement(
-					"DELETE FROM olaf_metadata WHERE resource_id = ?")) {
-				del.setLong(1, resourceID);
-				del.executeUpdate();
-			}
-			return fpCount + metaCount;
-		} catch (SQLException e) {
+		try {
+			return deleteByResourceIds(Collections.singletonList(resourceID)).get(resourceID);
+		} catch (IllegalStateException e) {
 			LOG.log(Level.SEVERE, "Failed to delete resource_id=" + resourceID, e);
 			return -1;
 		}
@@ -226,33 +199,56 @@ public class OlafStorageClickHouse implements OlafStorage {
 
 	/**
 	 * Delete fingerprints and metadata of several resources with one statement
-	 * per table. {@code resource_id} is not the sort key, so each statement
-	 * scans the whole column; batching keeps that to one scan per table.
+	 * per table and no per-resource queries.
 	 *
-	 * <p>Returns the fingerprint row count per resource that existed before
-	 * deletion. Throws when ClickHouse fails, so callers never report a
-	 * delete that did not happen.</p>
+	 * <p>{@code resource_id} is not the sort key of {@code olaf_fingerprints}, and
+	 * a lightweight delete there is a mutation that rewrites the row mask of the
+	 * whole table. On production that takes minutes, far beyond the JDBC socket
+	 * timeout, so the fingerprint delete is only queued. The metadata delete is
+	 * small and waits for every replica: matches without metadata are dropped by
+	 * query and monitor, so a deleted resource stops matching at once. Rows
+	 * inserted later are not affected by the queued delete.</p>
+	 *
+	 * <p>Returns, per resource, the fingerprint count stored in its metadata
+	 * ({@code 0} when no metadata exists). Throws when ClickHouse fails, so
+	 * callers never report a delete that did not happen; retrying is safe.</p>
 	 */
 	public Map<Long, Long> deleteByResourceIds(Collection<Long> resourceIDs) {
-		Map<Long, Long> counts = new HashMap<>();
+		Map<Long, Long> counts = new LinkedHashMap<>();
 		if (resourceIDs.isEmpty()) return counts;
 		StringBuilder ids = new StringBuilder();
 		for (long id : resourceIDs) {
+			if (counts.put(id, 0L) != null) continue;
 			if (ids.length() > 0) ids.append(',');
 			ids.append(id);
-			counts.put(id, 0L);
 		}
 		try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-			try (ResultSet rs = stmt.executeQuery("SELECT toInt64(resource_id), count() FROM olaf_fingerprints"
+			try (ResultSet rs = stmt.executeQuery("SELECT resource_id, max(num_fingerprints) FROM olaf_metadata FINAL"
 					+ " WHERE resource_id IN (" + ids + ") GROUP BY resource_id")) {
-				while (rs.next()) counts.put(rs.getLong(1), rs.getLong(2));
+				while (rs.next()) counts.put(rs.getLong(1), Math.max(0L, rs.getLong(2)));
 			}
-			stmt.execute("DELETE FROM olaf_fingerprints WHERE resource_id IN (" + ids + ")");
-			stmt.execute("DELETE FROM olaf_metadata WHERE resource_id IN (" + ids + ")");
+			// Stay below the 60 s socket timeout so the real ClickHouse error reaches the caller.
+			stmt.execute("DELETE FROM olaf_metadata WHERE resource_id IN (" + ids + ")"
+					+ " SETTINGS lightweight_deletes_sync = 2, max_execution_time = 45");
+			stmt.execute("DELETE FROM olaf_fingerprints WHERE resource_id IN (" + ids + ")"
+					+ " SETTINGS lightweight_deletes_sync = 0");
 			return counts;
 		} catch (SQLException e) {
-			throw new IllegalStateException("Failed to delete OLAF resources " + ids, e);
+			throw new IllegalStateException("Failed to delete OLAF resources " + ids + ": " + describe(e), e);
 		}
+	}
+
+	/** The messages of {@code e} and its causes; the JDBC driver keeps the ClickHouse error in a cause. */
+	public static String describe(Throwable e) {
+		StringBuilder text = new StringBuilder();
+		Set<String> seen = new HashSet<>();
+		for (Throwable t = e; t != null && seen.size() < 5; t = t.getCause()) {
+			String message = t.getMessage();
+			if (message == null || !seen.add(message)) continue;
+			if (text.length() > 0) text.append(" <- ");
+			text.append(message.length() > 500 ? message.substring(0, 500) : message);
+		}
+		return text.length() == 0 ? e.getClass().getSimpleName() : text.toString();
 	}
 
 	@Override
