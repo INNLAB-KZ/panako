@@ -93,6 +93,7 @@ public class PanakoHttpServer {
 		server.createContext("/api/v1/query", new ApiKeyFilter(new QueryHandler(strategy, maxUploadSizeMB)));
 		server.createContext("/api/v1/monitor/url", new ApiKeyFilter(new MonitorUrlHandler(strategy, maxUploadSizeMB)));
 		server.createContext("/api/v1/monitor", new ApiKeyFilter(new MonitorHandler(strategy, maxUploadSizeMB)));
+		server.createContext("/api/v1/duplicates", new ApiKeyFilter(new DuplicatesHandler(writeLock)));
 		server.createContext("/api/v1/delete/by_id", new ApiKeyFilter(new DeleteByIdHandler()));
 		server.createContext("/api/v1/delete", new ApiKeyFilter(new DeleteHandler(strategy, writeLock, maxUploadSizeMB)));
 

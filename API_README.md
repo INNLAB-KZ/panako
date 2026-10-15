@@ -507,6 +507,117 @@ Response:
 }
 ```
 
+### Duplicate tracks: `/api/v1/duplicates`
+
+Finds reference tracks that are copies of the same master, for example one recording released under several ISRCs. Requires `STRATEGY=OLAF` and `OLAF_STORAGE=CLICKHOUSE`.
+
+**How similarity is measured.** Two copies of one master share many fingerprint hashes at one constant time offset. For a pair of tracks, the coverage of a track is the fraction of its seconds that have such aligned hashes. `similarity` is the lower of the two coverages, from 0 to 1. Hashes shared by more than `DUPLICATE_SCAN_MAX_TRACKS_PER_HASH` fingerprints are ignored. The scan compares only tracks whose durations differ by at most `DUPLICATE_SCAN_MAX_DURATION_DIFF_SECONDS` and whose offset is at most `DUPLICATE_SCAN_MAX_OFFSET_SECONDS`. Pairs at or above `DUPLICATE_MIN_SIMILARITY` (0.95) are labelled `duplicate`, and lower pairs are labelled `similar`.
+
+Calibration on production pairs (2026-10-15): copies of one master scored 0.97–1.0. Two pairs confirmed by hand scored 0.92 and 0.70; the 0.70 pair differs by 7 s in duration. Unrelated tracks share fewer than 10 aligned hashes. Check `similar` groups manually before deleting.
+
+#### `POST /api/v1/duplicates/scan`
+
+Starts a background scan of all fingerprints. The scan reads `olaf_fingerprints` in about 118 hash ranges, one after another, with `max_threads = DUPLICATE_SCAN_MAX_THREADS`. On the production catalog (2.35 billion rows) it is expected to take about 30 minutes. Returns HTTP 202, or HTTP 409 when a scan is already running.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/duplicates/scan -H "X-API-Key: $API_KEY"
+```
+
+Run the scan once. The results are stored in ClickHouse, and listing and deleting read only these tables. When a finished scan exists, `POST /scan` returns HTTP 409 unless the body is `{"force": true}`. A forced scan replaces the previous results in `olaf_duplicate_pairs` and `olaf_duplicate_tracks`, and is recorded in `olaf_duplicate_scans`. A failed scan leaves the previous results in place. When `olaf_fingerprints` is a `ReplicatedMergeTree`, the result tables are created as `ReplicatedMergeTree` too, so every replica serves the same results. Until a replica has received all pairs of the last scan, list and delete on that replica return HTTP 503. Scan progress is kept in memory. If the server restarts during a scan, start it again.
+
+#### `GET /api/v1/duplicates/scan`
+
+```json
+{
+  "status": "running",
+  "scan_id": "20261015T101500Z",
+  "partitions_done": 41,
+  "partitions_total": 118,
+  "candidate_pairs": 24120,
+  "pairs": 0,
+  "started_at": "2026-10-15T10:15:00Z",
+  "finished_at": null,
+  "last_finished_scan": {"scan_id": "20261014T090000Z", "started_at": "...", "finished_at": "...", "pairs": 23950}
+}
+```
+
+`status` is `idle`, `running`, `finished` or `failed` (with `error`).
+
+#### `GET /api/v1/duplicates?min_similarity=0.95&limit=100&offset=0`
+
+Lists groups of similar tracks from the last finished scan. Tracks are grouped when they are linked by pairs at or above `min_similarity`, directly or through other tracks. The default `min_similarity` is `DUPLICATE_SCAN_MIN_SIMILARITY` (0.5). Tracks deleted since the scan are left out.
+
+```json
+{
+  "status": "ok",
+  "scan_id": "20261015T101500Z",
+  "min_similarity": 0.950,
+  "duplicate_similarity": 0.950,
+  "total_groups": 1,
+  "offset": 0,
+  "groups": [{
+    "label": "duplicate",
+    "max_similarity": 0.991,
+    "min_similarity": 0.974,
+    "recommended_keep": 1000066942,
+    "tracks": [{
+      "resource_id": 1000066942, "isrc": "1000066942", "path": "1000066942.mp3",
+      "title": null, "audio_url": null, "duration": 228.7,
+      "fingerprints": 14236, "fingerprints_per_second": 62.2,
+      "mean_similarity": 0.982, "recommended": true
+    }],
+    "pairs": [{
+      "resource_a": 1000066942, "resource_b": 1584800188, "label": "duplicate",
+      "similarity": 0.991, "coverage_a": 0.991, "coverage_b": 0.991,
+      "offset_seconds": 0.016, "aligned_hits": 11302
+    }]
+  }]
+}
+```
+
+`recommended_keep` is the copy that represents the group best for recognition. It is chosen by the highest `mean_similarity` to the other members, then the highest `fingerprints_per_second` (more hashes to match in noisy broadcasts), then the longest duration. The choice is a suggestion only; you can keep any track.
+
+#### `POST /api/v1/duplicates/delete`
+
+Deletes copies of a kept track. Each track must have a stored pair with `keep` in the last scan, with `similarity` at least `min_similarity` (default `DUPLICATE_SCAN_MIN_SIMILARITY`). With `"verify": true`, tracks are compared with `keep` on the current fingerprints instead, without duration limits; use this for tracks that are in one group only through other members. If any track fails, the request deletes nothing and returns HTTP 409. `dry_run` is `true` by default; set it to `false` to delete. At most 100 ids per request.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/duplicates/delete \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"keep": 1000066942, "delete": [1584800188, 1000082958], "dry_run": false}'
+```
+
+```json
+{
+  "status": "ok",
+  "keep": 1000066942,
+  "min_similarity": 0.500,
+  "tracks": [{
+    "resource_id": 1584800188, "isrc": "FR96X2648609", "similarity": 0.991, "verified": true,
+    "coverage_keep": 0.991, "coverage_track": 0.991, "offset_seconds": 0.000, "aligned_hits": 11302,
+    "deleted": true, "fingerprints_deleted": 14120
+  }]
+}
+```
+
+The response also has `verified_on`: `scan:<scan_id>` or `fingerprints`. `status` is `dry_run`, `ok`, or `rejected` (HTTP 409). The `"verify": true` check reads the `resource_id` column of the whole table, so expect about 10 seconds per request. Every deleted track is logged in `olaf_duplicate_deletions`, which rescans do not clear. Deletion uses lightweight `DELETE` on `olaf_fingerprints` and `olaf_metadata`. Add the deleted ISRCs as aliases of the kept track in trackDB **before** deleting, or monitor results will lose those ISRCs.
+
+#### `GET /api/v1/duplicates/deletions?limit=100&offset=0`
+
+Lists deleted copies, newest first, with the ISRC kept in their place. Use it to add trackDB aliases.
+
+```json
+{
+  "status": "ok",
+  "offset": 0,
+  "deletions": [{
+    "deleted_at": "2026-10-15T11:02:00Z", "keep": 1000066942, "keep_isrc": "1000066942",
+    "resource_id": 1584800188, "isrc": "FR96X2648609", "similarity": 0.991,
+    "verified_on": "scan:20261015T101500Z", "fingerprints_deleted": 14120
+  }]
+}
+```
+
 ## Configuration
 
 All parameters can be set via CLI arguments (`KEY=VALUE`), system properties (`-DKEY=VALUE`), environment variables, or `~/.panako/config.properties`.
@@ -550,6 +661,18 @@ java --add-opens=java.base/java.nio=ALL-UNNAMED \
   MONITOR_STEP_SIZE=30 \
   MONITOR_OVERLAP=10
 ```
+
+### Duplicate scan
+
+| Parameter | Default | Description |
+|---|---|---|
+| `DUPLICATE_SCAN_PARTITION_ROWS` | 20000000 | Fingerprint rows per scan query. Larger values are faster but use more ClickHouse memory (76M rows used about 13 GB) |
+| `DUPLICATE_SCAN_MAX_TRACKS_PER_HASH` | 256 | Ignore hashes with more fingerprints than this |
+| `DUPLICATE_SCAN_MAX_OFFSET_SECONDS` | 10 | Largest time offset between two copies |
+| `DUPLICATE_SCAN_MAX_DURATION_DIFF_SECONDS` | 15 | Largest duration difference between two compared tracks |
+| `DUPLICATE_SCAN_MIN_SIMILARITY` | 0.5 | Pairs below this are not stored; default for listing and delete checks |
+| `DUPLICATE_SCAN_MAX_THREADS` | 4 | ClickHouse `max_threads` for scan queries |
+| `DUPLICATE_MIN_SIMILARITY` | 0.95 | Similarity from which a pair or group is labelled `duplicate` |
 
 ## Identifier Logic
 

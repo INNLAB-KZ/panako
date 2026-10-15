@@ -78,6 +78,11 @@ public class OlafStorageClickHouse implements OlafStorage {
 		return DriverManager.getConnection(jdbcUrl, properties);
 	}
 
+	/** Open a connection with the same timeouts as storage queries. The caller closes it. */
+	public Connection openConnection() throws SQLException {
+		return getConnection();
+	}
+
 	private void initSchema() {
 		try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
 			stmt.execute("CREATE TABLE IF NOT EXISTS olaf_fingerprints (" +
@@ -216,6 +221,37 @@ public class OlafStorageClickHouse implements OlafStorage {
 		} catch (SQLException e) {
 			LOG.log(Level.SEVERE, "Failed to delete resource_id=" + resourceID, e);
 			return -1;
+		}
+	}
+
+	/**
+	 * Delete fingerprints and metadata of several resources with one statement
+	 * per table. {@code resource_id} is not the sort key, so each statement
+	 * scans the whole column; batching keeps that to one scan per table.
+	 *
+	 * <p>Returns the fingerprint row count per resource that existed before
+	 * deletion. Throws when ClickHouse fails, so callers never report a
+	 * delete that did not happen.</p>
+	 */
+	public Map<Long, Long> deleteByResourceIds(Collection<Long> resourceIDs) {
+		Map<Long, Long> counts = new HashMap<>();
+		if (resourceIDs.isEmpty()) return counts;
+		StringBuilder ids = new StringBuilder();
+		for (long id : resourceIDs) {
+			if (ids.length() > 0) ids.append(',');
+			ids.append(id);
+			counts.put(id, 0L);
+		}
+		try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
+			try (ResultSet rs = stmt.executeQuery("SELECT toInt64(resource_id), count() FROM olaf_fingerprints"
+					+ " WHERE resource_id IN (" + ids + ") GROUP BY resource_id")) {
+				while (rs.next()) counts.put(rs.getLong(1), rs.getLong(2));
+			}
+			stmt.execute("DELETE FROM olaf_fingerprints WHERE resource_id IN (" + ids + ")");
+			stmt.execute("DELETE FROM olaf_metadata WHERE resource_id IN (" + ids + ")");
+			return counts;
+		} catch (SQLException e) {
+			throw new IllegalStateException("Failed to delete OLAF resources " + ids, e);
 		}
 	}
 

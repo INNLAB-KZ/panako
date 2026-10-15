@@ -573,6 +573,47 @@ public enum Key{
 	KAFKA_WORKER_THREADS(1),
 
 
+	///////////////////Duplicate scan config (OLAF + ClickHouse)
+
+	/**
+	 * Approximate fingerprint rows per scan partition. Larger partitions run
+	 * faster but use more ClickHouse memory (76M rows needed about 13 GB).
+	 */
+	DUPLICATE_SCAN_PARTITION_ROWS(20000000),
+
+	/**
+	 * Hashes shared by more tracks than this are ignored: they carry little
+	 * information and make the number of compared track pairs explode.
+	 */
+	DUPLICATE_SCAN_MAX_TRACKS_PER_HASH(256),
+
+	/**
+	 * Largest time offset (seconds) between two copies of the same master.
+	 */
+	DUPLICATE_SCAN_MAX_OFFSET_SECONDS(10),
+
+	/**
+	 * Largest duration difference (seconds) between two compared tracks.
+	 */
+	DUPLICATE_SCAN_MAX_DURATION_DIFF_SECONDS(15),
+
+	/**
+	 * Pairs below this similarity (0.0–1.0) are not stored by a scan.
+	 */
+	DUPLICATE_SCAN_MIN_SIMILARITY(0.5),
+
+	/**
+	 * ClickHouse max_threads for scan queries, to limit impact on recognition.
+	 */
+	DUPLICATE_SCAN_MAX_THREADS(4),
+
+	/**
+	 * Similarity (0.0–1.0) from which a pair is labelled a duplicate rather
+	 * than only similar.
+	 */
+	DUPLICATE_MIN_SIMILARITY(0.95),
+
+
 	///////////////////Security config
 
 	/**

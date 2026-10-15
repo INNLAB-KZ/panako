@@ -41,7 +41,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t innlabkz/ozen-panako:l
 Configuration: `Config` singleton + `Key` enum. Defaults are in `resources/defaults/config.properties`. To add a setting, add a `Key` with a default; env-var override then works automatically in the server.
 
 ### HTTP API (`be.panako.http`)
-Routes are registered in `PanakoHttpServer`: `health`, `stats`, `store`, `store/url`, `store/fingerprints`, `store/rename`, `query`, `query/fingerprints`, `monitor`, `monitor/url`, `delete`, `delete/by_id`, all under `/api/v1/`. Every route except `health` is wrapped in `ApiKeyFilter` (enabled when `API_KEY` is set). `HttpServer` contexts match by prefix, so register more specific paths (`/store/url`) before general ones (`/store`). A shared `ReentrantLock writeLock` serializes store/delete operations.
+Routes are registered in `PanakoHttpServer`: `health`, `stats`, `store`, `store/url`, `store/fingerprints`, `store/rename`, `query`, `query/fingerprints`, `monitor`, `monitor/url`, `duplicates` (with `/scan` and `/delete`, handled in `DuplicatesHandler`), `delete`, `delete/by_id`, all under `/api/v1/`. Every route except `health` is wrapped in `ApiKeyFilter` (enabled when `API_KEY` is set). `HttpServer` contexts match by prefix, so register more specific paths (`/store/url`) before general ones (`/store`). A shared `ReentrantLock writeLock` serializes store/delete operations.
 
 ### Monitor pipeline
 `MonitorHandler` holds the core recognition logic as static methods. HTTP handlers, `PanakoKafkaWorker`, `PanakoRedisStreamWorker`, and `resources/scripts/quality/RecognitionProbe.java` all reuse these methods:
