@@ -112,7 +112,22 @@ class DuplicateScanClickHouseTest {
 
 		Map<Long, Long> deleted = storage.deleteByResourceIds(Collections.singletonList(202L));
 		assertTrue(deleted.get(202L) > 0);
-		assertNull(storage.getMetadataExt(202));
+		assertNull(storage.getMetadataExt(202), "Metadata goes at once, so the track stops matching");
+		// The fingerprint delete is only queued; it must still complete.
+		long left = -1;
+		for (int i = 0; i < 60 && left != 0; i++) {
+			if (i > 0) Thread.sleep(500);
+			try (Connection conn = storage.openConnection(); Statement stmt = conn.createStatement();
+				 ResultSet rs = stmt.executeQuery("SELECT count() FROM olaf_fingerprints WHERE resource_id = 202")) {
+				rs.next();
+				left = rs.getLong(1);
+			}
+		}
+		assertEquals(0, left, "Queued fingerprint delete completes");
+		Map<Long, Long> again = storage.deleteByResourceIds(Arrays.asList(202L, 999L, 202L));
+		assertEquals(2, again.size());
+		assertEquals(0L, again.get(202L), "A repeated delete reports nothing left");
+		assertEquals(0L, again.get(999L), "An unknown id reports nothing");
 		assertTrue(scanner.loadPairs(scan.scanId, 0.5).isEmpty(), "Deleted tracks leave the list");
 		scanner.logDeletions(Collections.singletonList(new DuplicateScanner.Deletion(java.time.Instant.now(),
 				scan.scanId, 201, "201", 202, "202", pair.similarity(), "scan:" + scan.scanId, deleted.get(202L))));
