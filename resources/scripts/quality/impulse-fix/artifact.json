@@ -1,0 +1,7 @@
+{
+  "sha256": "83fdabf6150d92060d85b678430eaa8ea3f7eb1d4b9bb82584e8e878dd2a93d4",
+  "changed": [
+    "be/panako/strategy/olaf/storage/OlafStorageClickHouse.class",
+    "be/panako/strategy/olaf/OlafEventPointProcessor.class"
+  ]
+}

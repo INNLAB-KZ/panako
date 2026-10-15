@@ -54,15 +54,24 @@ public enum Key{
 	MAX_FILE_SIZE(6000),
 	
 	/**
-	 * The step size while monitoring a long audio fragment, in seconds.
+	 * The step size while monitoring a long audio fragment, in seconds (pass 1).
 	 */
 	MONITOR_STEP_SIZE(30),
 
 	/**
-	 * The overlap, also in seconds. By default detection resolution is 
-	 * 25-5=20 seconds.
+	 * The overlap, also in seconds (pass 1).
 	 */
 	MONITOR_OVERLAP(10),
+
+	/**
+	 * Step size for the second (fine) pass on unmatched gaps.
+	 */
+	MONITOR_STEP_SIZE_FINE(15),
+
+	/**
+	 * Overlap for the second (fine) pass on unmatched gaps.
+	 */
+	MONITOR_OVERLAP_FINE(5),
 	
 	/**
 	 * Enabling the ffmpeg pipe allows support for almost all audio formats in the
@@ -470,7 +479,149 @@ public enum Key{
 	/**
 	 * Chunk size (seconds) for boundary refinement queries.
 	 */
-	MONITOR_REFINE_CHUNK_SIZE(30);
+	MONITOR_REFINE_CHUNK_SIZE(30),
+
+	/**
+	 * Maximum number of concurrent monitor requests.
+	 * Additional requests will wait until a slot is available.
+	 */
+	MONITOR_MAX_CONCURRENT(2),
+
+	/**
+	 * Number of parallel threads for processing monitor windows.
+	 */
+	MONITOR_PARALLEL_WINDOWS(4),
+
+	/**
+	 * Maximum gap (seconds) between consecutive detection windows of the same
+	 * track before they are split into separate clusters in the monitor response.
+	 *
+	 * <p>The effective threshold is {@code min(this value, trackDuration * 0.5)}
+	 * when reference track duration is known — a track shorter than 60 seconds
+	 * cannot legitimately have two occurrences separated by more than half its
+	 * length without intermediate detections.</p>
+	 */
+	MONITOR_WINDOW_GAP_THRESHOLD(30.0),
+
+	/** CDN hostname eligible for direct-origin audio routing. Empty disables routing. */
+	AUDIO_CDN_HOST(""),
+
+	/** Object-storage base URL used for matching CDN audio URLs. Empty disables routing. */
+	AUDIO_ORIGIN_BASE_URL(""),
+
+	/** Retry original CDN URL after direct-origin download failure. */
+	AUDIO_ORIGIN_FALLBACK_TO_CDN("TRUE"),
+
+	/**
+	 * ClickHouse JDBC URL for OLAF storage.
+	 * Used when OLAF_STORAGE=CLICKHOUSE.
+	 */
+	OLAF_CLICKHOUSE_URL("jdbc:ch://localhost:8123/default"),
+
+	/**
+	 * ClickHouse JDBC URL for PANAKO storage.
+	 * Used when PANAKO_STORAGE=CLICKHOUSE.
+	 */
+	PANAKO_CLICKHOUSE_URL("jdbc:ch://localhost:8123/default"),
+
+
+	///////////////////Kafka config
+
+	/**
+	 * Enable Kafka consumer/producer. Set to TRUE to start Kafka integration.
+	 */
+	KAFKA_ENABLED("FALSE"),
+
+	/**
+	 * Kafka bootstrap servers.
+	 */
+	KAFKA_BOOTSTRAP_SERVERS("localhost:9092"),
+
+	/**
+	 * Kafka consumer group ID.
+	 */
+	KAFKA_GROUP_ID("panako"),
+
+	/**
+	 * Topic to consume store requests from.
+	 */
+	KAFKA_STORE_REQUEST_TOPIC("panako-store-requests"),
+
+	/**
+	 * Topic to produce store results to.
+	 */
+	KAFKA_STORE_RESULT_TOPIC("panako-store-results"),
+
+	/**
+	 * Topic to consume monitor requests from.
+	 */
+	KAFKA_REQUEST_TOPIC("panako.monitor.request"),
+
+	/**
+	 * Topic to produce monitor results to.
+	 */
+	KAFKA_RESPONSE_TOPIC("panako.monitor.response"),
+
+	/**
+	 * Kafka worker mode: ALL (store+monitor), STORE, MONITOR.
+	 */
+	KAFKA_MODE("ALL"),
+
+	/**
+	 * Number of parallel Kafka worker threads.
+	 */
+	KAFKA_WORKER_THREADS(1),
+
+
+	///////////////////Duplicate scan config (OLAF + ClickHouse)
+
+	/**
+	 * Approximate fingerprint rows per scan partition. Larger partitions run
+	 * faster but use more ClickHouse memory (76M rows needed about 13 GB).
+	 */
+	DUPLICATE_SCAN_PARTITION_ROWS(20000000),
+
+	/**
+	 * Hashes shared by more tracks than this are ignored: they carry little
+	 * information and make the number of compared track pairs explode.
+	 */
+	DUPLICATE_SCAN_MAX_TRACKS_PER_HASH(256),
+
+	/**
+	 * Largest time offset (seconds) between two copies of the same master.
+	 */
+	DUPLICATE_SCAN_MAX_OFFSET_SECONDS(10),
+
+	/**
+	 * Largest duration difference (seconds) between two compared tracks.
+	 */
+	DUPLICATE_SCAN_MAX_DURATION_DIFF_SECONDS(15),
+
+	/**
+	 * Pairs below this similarity (0.0–1.0) are not stored by a scan.
+	 */
+	DUPLICATE_SCAN_MIN_SIMILARITY(0.5),
+
+	/**
+	 * ClickHouse max_threads for scan queries, to limit impact on recognition.
+	 */
+	DUPLICATE_SCAN_MAX_THREADS(4),
+
+	/**
+	 * Similarity (0.0–1.0) from which a pair is labelled a duplicate rather
+	 * than only similar.
+	 */
+	DUPLICATE_MIN_SIMILARITY(0.95),
+
+
+	///////////////////Security config
+
+	/**
+	 * API key for authenticating HTTP requests.
+	 * If empty, no authentication is required.
+	 * Set via API_KEY environment variable or config.
+	 */
+	API_KEY("");
 
 
     String defaultValue;

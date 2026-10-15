@@ -32,3 +32,7 @@ eval_panako
 
 data
 .env
+
+# Generated Python bytecode
+__pycache__/
+*.py[cod]

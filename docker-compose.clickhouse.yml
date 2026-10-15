@@ -1,0 +1,50 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3
+    container_name: clickhouse
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+      - ./logs:/var/log/clickhouse-server
+      - ./config:/etc/clickhouse-server/config.d
+      - ./users:/etc/clickhouse-server/users.d
+    ulimits:
+      nofile: {soft: 500000, hard: 500000}
+      nproc: {soft: 65535, hard: 65535}
+    cap_add: [SYS_NICE, IPC_LOCK]
+    mem_limit: 14g
+    mem_reservation: 8g
+    cpus: 8.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  clickhouse-optimizer:
+    image: clickhouse/clickhouse-server:26.3
+    container_name: clickhouse-optimizer
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sleep 60
+        while true; do
+          echo "[$$(date -Iseconds)] OPTIMIZE start"
+          clickhouse-client --host 127.0.0.1 \
+            --password "$$CLICKHOUSE_PASSWORD" \
+            -q "OPTIMIZE TABLE olaf_fingerprints FINAL"
+          echo "[$$(date -Iseconds)] OPTIMIZE done"
+          sleep 86400
+        done
+    environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - ./logs:/var/log/clickhouse-server

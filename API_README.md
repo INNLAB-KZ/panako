@@ -58,6 +58,38 @@ The API will be available at `http://localhost:8344` (mapped to container port 8
 
 Database files are persisted in `./data/panako-db`.
 
+## Authentication
+
+All endpoints except `/api/v1/health` require an API key when `API_KEY` is configured.
+
+Pass the key via `X-API-Key` header (recommended) or `api_key` query parameter:
+
+```bash
+# Header (recommended)
+curl -H "X-API-Key: your-secret-key" http://localhost:8080/api/v1/stats
+
+# Query parameter
+curl http://localhost:8080/api/v1/stats?api_key=your-secret-key
+```
+
+Set the key via environment variable or config:
+
+```bash
+# Environment variable
+API_KEY=your-secret-key
+
+# Docker compose (.env file)
+API_KEY=your-secret-key
+```
+
+If `API_KEY` is empty or not set, authentication is disabled (all requests allowed).
+
+Unauthorized requests receive:
+
+```json
+{"status": "error", "message": "Invalid or missing API key"}
+```
+
 ## API Endpoints
 
 ### `GET /api/v1/health`
@@ -97,6 +129,8 @@ Response:
 
 Store audio fingerprints. Accepts `multipart/form-data` with field name `audio`.
 
+OLAF indexes audio longer than five minutes in overlapping five-minute chunks under one resource ID. Stored fingerprint times remain relative to the full track. For OLAF, content deduplication of audio longer than 30 seconds queries overlapping 30-second windows across the whole file and requires every window to match the same track at a consistent alignment, with a duration within 5 seconds. The response reports the stored fingerprint count. If any chunk fails, indexing returns an error and removes partial ClickHouse rows.
+
 Filename should be `ISRC.ext` (e.g. `USRC17607839.mp3`). The ISRC is extracted and returned in the response.
 
 ```bash
@@ -117,7 +151,7 @@ Response:
 }
 ```
 
-If the same ISRC is already stored (duplicate):
+If the same filename/ISRC is already stored (hash duplicate):
 
 ```json
 {
@@ -129,6 +163,39 @@ If the same ISRC is already stored (duplicate):
   "fingerprints_count": 1250
 }
 ```
+
+If the uploaded audio is the same content as an already-indexed track under a different filename/ISRC (content duplicate, ≥99% fingerprint match), the upload is **not** indexed and the canonical match is returned:
+
+```json
+{
+  "status": "already_indexed_match",
+  "identifier": 1612789453,
+  "isrc": "USRC17607839",
+  "filename": "USRC17607839.mp3",
+  "title": "Artist:Track",
+  "audio_url": "https://example.com/USRC17607839.mp3",
+  "match_percentage": 99.8,
+  "submitted_filename": "QZHN82412345.mp3",
+  "submitted_isrc": "QZHN82412345"
+}
+```
+
+`identifier`/`isrc`/`filename`/`title`/`audio_url` describe the canonical already-indexed track. `submitted_*` fields echo what the caller uploaded. The store endpoint never indexes the upload in this case — clients should use the canonical `identifier` going forward.
+
+If the uploaded file is 0 bytes, no indexing happens:
+
+```json
+{
+  "status": "skipped_empty",
+  "identifier": 1612789453,
+  "isrc": "USRC17607839",
+  "filename": "USRC17607839.mp3",
+  "title": null,
+  "audio_url": null
+}
+```
+
+All status responses (`ok`, `already_exists`, `already_indexed_match`, `skipped_empty`) are HTTP **200 OK**. Only `400`/`500` indicate real errors.
 
 ### `POST /api/v1/store/url`
 
@@ -158,7 +225,53 @@ Response:
 }
 ```
 
-Duplicate check works the same as `POST /api/v1/store` (returns `already_exists` with `duration_seconds` and `fingerprints_count`).
+Both `already_exists` (hash duplicate) and `already_indexed_match` (content duplicate ≥99%) checks work the same as `POST /api/v1/store`. The `already_indexed_match` response on this endpoint additionally includes the original `submitted_audio_url`. A 0-byte download returns `status:"skipped_empty"` without indexing.
+
+### `POST /api/v1/store/rename`
+
+Change the `path` column on an existing `olaf_metadata` / `panako_metadata` row **without re-running fingerprinting**. The underlying fingerprints stay attached to the same `resource_id`; only the descriptive `path` label changes. Useful when the canonical filename of an already-indexed track changes (e.g. a temp upload name like `/tmp/1000067653.mp3` should be relabelled to its real ISRC filename `RUAGT2342680.m4a`).
+
+Accepts `application/json` with one of these shapes:
+
+```bash
+# by identifier (preferred — directly addresses the resource_id)
+curl -X POST http://localhost:8080/api/v1/store/rename \
+  -H "Content-Type: application/json" \
+  -d '{"identifier": 1612789453, "new_path": "RUAGT2342680.m4a"}'
+
+# by old_path (resource_id is recomputed via the same identifier hash function)
+curl -X POST http://localhost:8080/api/v1/store/rename \
+  -H "Content-Type: application/json" \
+  -d '{"old_path": "/tmp/1000067653.mp3", "new_path": "RUAGT2342680.m4a"}'
+```
+
+- `new_path` — required, new value to write into the `path` column
+- `identifier` — Int64 `resource_id` from `olaf_metadata` (preferred when known)
+- `old_path` — string; ignored when `identifier` is supplied. Used as input to `FileUtils.getIdentifier()` to derive the `resource_id`. Must produce the exact same hash that was used at index time.
+
+Response on success (HTTP 200):
+
+```json
+{
+  "status": "ok",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a"
+}
+```
+
+When no metadata row exists for the resolved `resource_id` (HTTP 404):
+
+```json
+{
+  "status": "not_found",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a"
+}
+```
+
+Notes:
+- Only supported on ClickHouse storage. LMDB backends serialize path inside the metadata blob and cannot be patched in place — the endpoint returns `not_found` on LMDB.
+- Implementation: `SELECT FINAL` reads the current `duration`/`num_fingerprints`/`title`/`audio_url` and a new row is inserted with the same `resource_id` plus the new `path`. The `ReplacingMergeTree` engine collapses the duplicate on the next background merge.
 
 ### `POST /api/v1/store/fingerprints`
 
@@ -356,6 +469,34 @@ Delete fingerprints. Accepts `multipart/form-data` with the original audio file.
 curl -X POST http://localhost:8080/api/v1/delete -F "audio=@USRC17607839.mp3"
 ```
 
+### `POST /api/v1/delete/by_id`
+
+Delete fingerprints **and** metadata for a known `resource_id` without needing the original audio file. Accepts `application/json`.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/delete/by_id \
+  -H "Content-Type: application/json" \
+  -d '{"identifier": 1979144137}'
+```
+
+- `identifier` (or alias `resource_id`) — required, the Int64 row key from `olaf_metadata`
+
+Response (HTTP 200):
+
+```json
+{
+  "status": "ok",
+  "identifier": 1979144137,
+  "rows_deleted": 13762
+}
+```
+
+`rows_deleted` is the combined row count (fingerprints + metadata) that existed prior to the call.
+
+Notes:
+- Only supported on ClickHouse storage. LMDB backends store path inside the metadata blob — use `/api/v1/delete` with the original audio file instead.
+- Implementation: issues lightweight `DELETE FROM olaf_fingerprints WHERE resource_id = ?` plus `DELETE FROM olaf_metadata WHERE resource_id = ?`. The deletion replicates through ClickHouse Keeper to every replica automatically.
+
 Response:
 
 ```json
@@ -363,6 +504,117 @@ Response:
   "status": "ok",
   "identifier": 1612789453,
   "deleted": true
+}
+```
+
+### Duplicate tracks: `/api/v1/duplicates`
+
+Finds reference tracks that are copies of the same master, for example one recording released under several ISRCs. Requires `STRATEGY=OLAF` and `OLAF_STORAGE=CLICKHOUSE`.
+
+**How similarity is measured.** Two copies of one master share many fingerprint hashes at one constant time offset. For a pair of tracks, the coverage of a track is the fraction of its seconds that have such aligned hashes. `similarity` is the lower of the two coverages, from 0 to 1. Hashes shared by more than `DUPLICATE_SCAN_MAX_TRACKS_PER_HASH` fingerprints are ignored. The scan compares only tracks whose durations differ by at most `DUPLICATE_SCAN_MAX_DURATION_DIFF_SECONDS` and whose offset is at most `DUPLICATE_SCAN_MAX_OFFSET_SECONDS`. Pairs at or above `DUPLICATE_MIN_SIMILARITY` (0.95) are labelled `duplicate`, and lower pairs are labelled `similar`.
+
+Calibration on production pairs (2026-10-15): copies of one master scored 0.97–1.0. Two pairs confirmed by hand scored 0.92 and 0.70; the 0.70 pair differs by 7 s in duration. Unrelated tracks share fewer than 10 aligned hashes. Check `similar` groups manually before deleting.
+
+#### `POST /api/v1/duplicates/scan`
+
+Starts a background scan of all fingerprints. The scan reads `olaf_fingerprints` in about 118 hash ranges, one after another, with `max_threads = DUPLICATE_SCAN_MAX_THREADS`. On the production catalog (2.35 billion rows) it is expected to take about 30 minutes. Returns HTTP 202, or HTTP 409 when a scan is already running.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/duplicates/scan -H "X-API-Key: $API_KEY"
+```
+
+Run the scan once. The results are stored in ClickHouse, and listing and deleting read only these tables. When a finished scan exists, `POST /scan` returns HTTP 409 unless the body is `{"force": true}`. A forced scan replaces the previous results in `olaf_duplicate_pairs` and `olaf_duplicate_tracks`, and is recorded in `olaf_duplicate_scans`. A failed scan leaves the previous results in place. When `olaf_fingerprints` is a `ReplicatedMergeTree`, the result tables are created as `ReplicatedMergeTree` too, so every replica serves the same results. Until a replica has received all pairs of the last scan, list and delete on that replica return HTTP 503. Scan progress is kept in memory. If the server restarts during a scan, start it again.
+
+#### `GET /api/v1/duplicates/scan`
+
+```json
+{
+  "status": "running",
+  "scan_id": "20261015T101500Z",
+  "partitions_done": 41,
+  "partitions_total": 118,
+  "candidate_pairs": 24120,
+  "pairs": 0,
+  "started_at": "2026-10-15T10:15:00Z",
+  "finished_at": null,
+  "last_finished_scan": {"scan_id": "20261014T090000Z", "started_at": "...", "finished_at": "...", "pairs": 23950}
+}
+```
+
+`status` is `idle`, `running`, `finished` or `failed` (with `error`).
+
+#### `GET /api/v1/duplicates?min_similarity=0.95&limit=100&offset=0`
+
+Lists groups of similar tracks from the last finished scan. Tracks are grouped when they are linked by pairs at or above `min_similarity`, directly or through other tracks. The default `min_similarity` is `DUPLICATE_SCAN_MIN_SIMILARITY` (0.5). Tracks deleted since the scan are left out.
+
+```json
+{
+  "status": "ok",
+  "scan_id": "20261015T101500Z",
+  "min_similarity": 0.950,
+  "duplicate_similarity": 0.950,
+  "total_groups": 1,
+  "offset": 0,
+  "groups": [{
+    "label": "duplicate",
+    "max_similarity": 0.991,
+    "min_similarity": 0.974,
+    "recommended_keep": 1000066942,
+    "tracks": [{
+      "resource_id": 1000066942, "isrc": "1000066942", "path": "1000066942.mp3",
+      "title": null, "audio_url": null, "duration": 228.7,
+      "fingerprints": 14236, "fingerprints_per_second": 62.2,
+      "mean_similarity": 0.982, "recommended": true
+    }],
+    "pairs": [{
+      "resource_a": 1000066942, "resource_b": 1584800188, "label": "duplicate",
+      "similarity": 0.991, "coverage_a": 0.991, "coverage_b": 0.991,
+      "offset_seconds": 0.016, "aligned_hits": 11302
+    }]
+  }]
+}
+```
+
+`recommended_keep` is the copy that represents the group best for recognition. It is chosen by the highest `mean_similarity` to the other members, then the highest `fingerprints_per_second` (more hashes to match in noisy broadcasts), then the longest duration. The choice is a suggestion only; you can keep any track.
+
+#### `POST /api/v1/duplicates/delete`
+
+Deletes copies of a kept track. Each track must have a stored pair with `keep` in the last scan, with `similarity` at least `min_similarity` (default `DUPLICATE_SCAN_MIN_SIMILARITY`). With `"verify": true`, tracks are compared with `keep` on the current fingerprints instead, without duration limits; use this for tracks that are in one group only through other members. If any track fails, the request deletes nothing and returns HTTP 409. `dry_run` is `true` by default; set it to `false` to delete. At most 100 ids per request.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/duplicates/delete \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"keep": 1000066942, "delete": [1584800188, 1000082958], "dry_run": false}'
+```
+
+```json
+{
+  "status": "ok",
+  "keep": 1000066942,
+  "min_similarity": 0.500,
+  "tracks": [{
+    "resource_id": 1584800188, "isrc": "FR96X2648609", "similarity": 0.991, "verified": true,
+    "coverage_keep": 0.991, "coverage_track": 0.991, "offset_seconds": 0.000, "aligned_hits": 11302,
+    "deleted": true, "fingerprints_deleted": 14120
+  }]
+}
+```
+
+The response also has `verified_on`: `scan:<scan_id>` or `fingerprints`. `status` is `dry_run`, `ok`, or `rejected` (HTTP 409). The `"verify": true` check reads the `resource_id` column of the whole table, so expect about 10 seconds per request. Every deleted track is logged in `olaf_duplicate_deletions`, which rescans do not clear. Deletion uses lightweight `DELETE` on `olaf_fingerprints` and `olaf_metadata`. Add the deleted ISRCs as aliases of the kept track in trackDB **before** deleting, or monitor results will lose those ISRCs.
+
+#### `GET /api/v1/duplicates/deletions?limit=100&offset=0`
+
+Lists deleted copies, newest first, with the ISRC kept in their place. Use it to add trackDB aliases.
+
+```json
+{
+  "status": "ok",
+  "offset": 0,
+  "deletions": [{
+    "deleted_at": "2026-10-15T11:02:00Z", "keep": 1000066942, "keep_isrc": "1000066942",
+    "resource_id": 1584800188, "isrc": "FR96X2648609", "similarity": 0.991,
+    "verified_on": "scan:20261015T101500Z", "fingerprints_deleted": 14120
+  }]
 }
 ```
 
@@ -374,8 +626,9 @@ All parameters can be set via CLI arguments (`KEY=VALUE`), system properties (`-
 
 | Parameter | Default | Description |
 |---|---|---|
+| `API_KEY` | _(empty)_ | API key for authentication. If empty, auth is disabled |
 | `SERVER_PORT` | 8080 | HTTP server port |
-| `SERVER_MAX_UPLOAD_SIZE_MB` | 100 | Maximum upload file size in MB |
+| `SERVER_MAX_UPLOAD_SIZE_MB` | 256 | Maximum upload file size in MB |
 | `SERVER_THREAD_POOL_SIZE` | 10 | HTTP handler thread pool size |
 | `STRATEGY` | OLAF | Fingerprinting algorithm (`OLAF` or `PANAKO`) |
 
@@ -409,6 +662,18 @@ java --add-opens=java.base/java.nio=ALL-UNNAMED \
   MONITOR_OVERLAP=10
 ```
 
+### Duplicate scan
+
+| Parameter | Default | Description |
+|---|---|---|
+| `DUPLICATE_SCAN_PARTITION_ROWS` | 20000000 | Fingerprint rows per scan query. Larger values are faster but use more ClickHouse memory (76M rows used about 13 GB) |
+| `DUPLICATE_SCAN_MAX_TRACKS_PER_HASH` | 256 | Ignore hashes with more fingerprints than this |
+| `DUPLICATE_SCAN_MAX_OFFSET_SECONDS` | 10 | Largest time offset between two copies |
+| `DUPLICATE_SCAN_MAX_DURATION_DIFF_SECONDS` | 15 | Largest duration difference between two compared tracks |
+| `DUPLICATE_SCAN_MIN_SIMILARITY` | 0.5 | Pairs below this are not stored; default for listing and delete checks |
+| `DUPLICATE_SCAN_MAX_THREADS` | 4 | ClickHouse `max_threads` for scan queries |
+| `DUPLICATE_MIN_SIMILARITY` | 0.95 | Similarity from which a pair or group is labelled `duplicate` |
+
 ## Identifier Logic
 
 The `identifier` is a stable numeric key derived from the filename (without extension):
@@ -422,6 +687,141 @@ This ensures the same ISRC always maps to the same identifier, enabling duplicat
 ## Concurrency
 
 LMDB allows concurrent reads but only a single writer. Store and delete operations are serialized with a lock. Query and stats requests run concurrently without blocking.
+
+## Async queue (Redis Streams)
+
+When `REDIS_ENABLED=true`, workers also consume tasks from Redis Streams instead of (or alongside) the synchronous HTTP API. Stream names default to the Kafka topic names so the same orchestrator schema works for both backends.
+
+### Streams
+
+| Request stream | Result stream | Purpose |
+|---|---|---|
+| `panako-store-requests` | `panako-store-results` | Store audio by URL (download + fingerprint + index) |
+| `panako-store-patch` | `panako-store-patch-results` | Patch `olaf_metadata` rows without re-fingerprinting (rename, etc) |
+| `panako.monitor.request` | `panako.monitor.response` | Monitor long audio for multiple matches |
+| `panako.monitor.refine.request` | `panako.monitor.refine.response` | Stage 3 refine (dedicated pool, `PANAKO_WORKER_MODE=refine`) |
+
+Set `REDIS_STORE_PATCH_ENABLED=false` to exclude `panako-store-patch` from a Redis
+STORE/ALL worker while continuing ingestion. Default: `true`. This pauses maintenance
+only for workers with this setting; queued requests remain in Redis.
+
+Each request is XADDed with `{"key": "<request_id>", "value": "<json>"}`. Responses are XADDed the same way to the matching result stream.
+
+Monitor audio downloads support direct-origin routing without changing stream payloads:
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUDIO_CDN_HOST` | empty | Exact source hostname to rewrite; empty disables routing |
+| `AUDIO_ORIGIN_BASE_URL` | empty | Absolute HTTP(S) object-storage base URL; empty disables routing |
+| `AUDIO_ORIGIN_FALLBACK_TO_CDN` | `TRUE` | Retry original source URL after origin failure |
+
+When configured for `cdn-broadcast.ozenx.io` and
+`https://hel1.your-objectstorage.com/broadcast`, path and query are preserved. URL logs omit query
+parameters. Both `panako.monitor.request` and `panako.monitor.refine.request` use this shared
+download path.
+
+### `panako-store-requests` — store by URL
+
+```json
+{
+  "audio_url": "https://example.com/USRC17607839.mp3",
+  "filename": "USRC17607839.mp3",
+  "title": "Artist:Track",
+  "request_id": "scrape-12345"
+}
+```
+
+Possible response statuses on `panako-store-results` (mirror the HTTP `/store/url` endpoint):
+
+- `ok` — indexed successfully
+- `already_exists` — hash duplicate (same filename was already indexed)
+- `already_indexed_match` — content duplicate (≥99% fingerprint match), upload skipped
+- `skipped_empty` — 0-byte download, upload skipped
+- `error` — see `error` field
+
+### `panako-store-patch` — modify metadata
+
+Patch operations dispatch by the `action` field. Supported actions: `rename`, `delete`.
+
+#### `action: "rename"` — change the `path` column for an existing row without re-fingerprinting
+
+```json
+{
+  "action": "rename",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a",
+  "request_id": "rename-RUAGT2342680"
+}
+```
+
+or by `old_path`:
+
+```json
+{
+  "action": "rename",
+  "old_path": "/tmp/1000067653.mp3",
+  "new_path": "RUAGT2342680.m4a",
+  "request_id": "rename-RUAGT2342680"
+}
+```
+
+Response on `panako-store-patch-results`:
+
+```json
+{
+  "status": "renamed",
+  "action": "rename",
+  "request_id": "rename-RUAGT2342680",
+  "identifier": 1612789453,
+  "new_path": "RUAGT2342680.m4a"
+}
+```
+
+Statuses:
+- `renamed` — row found, new path written
+- `rename_not_found` — no metadata row exists for the resolved `resource_id`
+- `error` — see `error` field (missing `new_path`, missing identifier source, etc.)
+
+#### `action: "delete"` — remove fingerprints and metadata for a resource_id
+
+Async equivalent of `POST /api/v1/delete/by_id`. Useful when the workflow already produces patch requests for the same `resource_id`.
+
+```json
+{
+  "action": "delete",
+  "identifier": 1979144137,
+  "request_id": "del-FR59R2638511"
+}
+```
+
+or by `path`:
+
+```json
+{
+  "action": "delete",
+  "path": "/tmp/FR59R2638511.m4a",
+  "request_id": "del-FR59R2638511"
+}
+```
+
+Response on `panako-store-patch-results`:
+
+```json
+{
+  "status": "deleted",
+  "action": "delete",
+  "request_id": "del-FR59R2638511",
+  "identifier": 1979144137,
+  "rows_deleted": 13762
+}
+```
+
+Statuses:
+- `deleted` — issued; `rows_deleted` is the combined fingerprint + metadata row count that existed prior to the call
+- `delete_failed` — backend rejected the delete (e.g. LMDB storage active — only ClickHouse is supported)
+- `error` — see `error` field (missing identifier source, etc.)
+
+Override stream names via env: `REDIS_PATCH_REQUEST_STREAM`, `REDIS_PATCH_RESULT_STREAM`.
 
 ## JVM Flag
 

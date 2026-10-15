@@ -1,0 +1,16 @@
+<clickhouse>
+  <zookeeper replace="replace">
+    <node index="1">
+      <host>10.0.1.2</host>
+      <port>19181</port>
+    </node>
+    <node index="2">
+      <host>10.0.0.12</host>
+      <port>9181</port>
+    </node>
+    <node index="3">
+      <host>10.0.0.10</host>
+      <port>9181</port>
+    </node>
+  </zookeeper>
+</clickhouse>

@@ -1,0 +1,17 @@
+{
+  "services": {
+    "keeper": {
+      "image": "clickhouse/clickhouse-keeper@sha256:76fcf48c7bf75c4a07a86ecb52b451f91a2e35f0fe0e1913ef666eb90db1021e",
+      "container_name": "clickhouse-keeper",
+      "network_mode": "host",
+      "restart": "unless-stopped",
+      "cpus": 1,
+      "mem_limit": "1g",
+      "volumes": [
+        "./keeper-3.xml:/etc/clickhouse-keeper/keeper_config.xml:ro",
+        "./data:/var/lib/clickhouse-keeper",
+        "./logs:/var/log/clickhouse-keeper"
+      ]
+    }
+  }
+}

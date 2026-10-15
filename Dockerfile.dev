@@ -1,0 +1,34 @@
+# Dev build — caches Gradle and dependencies between builds
+FROM eclipse-temurin:17-jdk-jammy AS builder
+
+WORKDIR /build
+
+# 1) Cache Gradle wrapper download
+COPY gradlew .
+COPY gradle/ gradle/
+RUN chmod +x gradlew && ./gradlew --version --no-daemon
+
+# 2) Cache dependencies
+COPY build.gradle settings.gradle ./
+RUN ./gradlew dependencies --no-daemon || true
+
+# 3) Only source changes trigger recompile
+COPY src/ src/
+COPY resources/ resources/
+RUN ./gradlew shadowJar --no-daemon
+
+# Runtime stage
+FROM eclipse-temurin:17-jre-jammy
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg liblmdb0 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/build/libs/panako-*-all.jar /app/panako.jar
+RUN mkdir -p /root/.panako/dbs
+
+EXPOSE 8080
+ENTRYPOINT ["java", "--add-opens=java.base/java.nio=ALL-UNNAMED", "-cp", "/app/panako.jar", "be.panako.http.PanakoHttpServer"]
+CMD ["SERVER_PORT=8080"]
+
+#  docker build -f Dockerfile.dev -t innlabkz/ozen-panako:latest .

@@ -1,0 +1,22 @@
+{
+  "phase": "passed",
+  "production_queues_untouched": true,
+  "runs": [
+    {
+      "mode": "baseline",
+      "elapsed_seconds": 544.476,
+      "sampled_peak_heap_bytes": 3186733568,
+      "raw_matches": 94
+    },
+    {
+      "mode": "candidate",
+      "elapsed_seconds": 536.635,
+      "sampled_peak_heap_bytes": 3035475968,
+      "raw_matches": 94
+    }
+  ],
+  "elapsed_run_seconds": 531,
+  "raw_equal": true,
+  "response_equal": true,
+  "finished_at": "2026-09-29T12:11:09.496944+00:00"
+}

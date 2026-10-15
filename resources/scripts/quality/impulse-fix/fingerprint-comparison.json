@@ -1,0 +1,13 @@
+{
+  "phase": "passed",
+  "heavy_window": {
+    "before": 6454009,
+    "after": 1401,
+    "expected_without_four_noise_frames": 1401
+  },
+  "windows": 119,
+  "changed_offsets": [
+    1740
+  ],
+  "unexpected_mismatches": []
+}

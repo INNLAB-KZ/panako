@@ -1,0 +1,24 @@
+services:
+  # Query-only HTTP API — no Kafka, read-only against remote ClickHouse
+  panako-query:
+    image: innlabkz/ozen-panako:latest
+    ports:
+      - "8344-8351:8080"          # 8 портов для 8 replicas
+    environment:
+      - JAVA_OPTS=-Xmx2g
+      - STRATEGY=OLAF
+      - OLAF_STORAGE=CLICKHOUSE
+      - OLAF_CLICKHOUSE_URL=jdbc:ch://${CLICKHOUSE_HOST}:8123/default?user=${CLICKHOUSE_USER}&password=${CLICKHOUSE_PASSWORD}
+      - OLAF_CACHE_TO_FILE=FALSE
+      - OLAF_USE_CACHED_PRINTS=FALSE
+      - SERVER_PORT=8080
+      - MONITOR_STEP_SIZE=${MONITOR_STEP_SIZE:-60}
+      - MONITOR_OVERLAP=${MONITOR_OVERLAP:-10}
+      - MONITOR_STEP_SIZE_FINE=${MONITOR_STEP_SIZE_FINE:-15}
+      - MONITOR_OVERLAP_FINE=${MONITOR_OVERLAP_FINE:-5}
+      - MONITOR_PARALLEL_WINDOWS=${MONITOR_PARALLEL_WINDOWS:-2}
+      - API_KEY=${API_KEY:-}
+      - KAFKA_ENABLED=FALSE
+    deploy:
+      replicas: 8
+    restart: unless-stopped

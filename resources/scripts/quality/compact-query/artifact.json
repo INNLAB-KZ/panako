@@ -1,0 +1,10 @@
+{
+  "sha256": "6d5dd3ddc6ad620e598426a46bd398ea662f5b2e641b7cc2c7611c42805a997b",
+  "changed": [
+    "be/panako/strategy/olaf/storage/OlafStorageClickHouse.class"
+  ],
+  "added": [
+    "be/panako/strategy/olaf/storage/OlafPackedHitList.class",
+    "be/panako/strategy/olaf/storage/OlafQueryHashIndex.class"
+  ]
+}

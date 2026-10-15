@@ -42,8 +42,9 @@ public class StatsHandler implements HttpHandler {
 			String statsOutput = baos.toString();
 
 			// Parse key numbers from the output
-			long fingerprintCount = parseLong(statsOutput, "fingerprint hashes", "items in databases");
-			long audioItemsCount = parseLong(statsOutput, "audio files", 0);
+			long fingerprintCount = parseLong(statsOutput, "fingerprint hashes", "Fingerprints");
+			if (fingerprintCount == 0) fingerprintCount = parseLong(statsOutput, "items in databases", 0);
+			long audioItemsCount = parseLong(statsOutput, "audio files", "Audio items");
 			String strategyName = Config.get(Key.STRATEGY);
 
 			StringBuilder json = new StringBuilder();

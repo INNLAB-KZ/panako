@@ -162,10 +162,35 @@ public class OlafEventPointProcessor implements AudioProcessor {
 	   
 	}
 	
+    /**
+     * A single one-LSB sample in an otherwise silent PCM16 analysis frame has
+     * an almost flat spectrum. Round-off turns that spectrum into hundreds of
+     * equal local maxima, whose triples can produce millions of fingerprints.
+     * Only this isolated quantization-floor impulse is suppressed. Frames with
+     * two nonzero samples or any stronger sample are left byte-for-byte intact.
+     */
+    static boolean suppressIsolatedQuantizationImpulse(float[] samples) {
+        // TarsosDSP's signed PCM16 decoder normalizes by 32767, not 32768.
+        final float onePcm16Step = 1.0f / 32767.0f;
+        int nonzero = 0;
+        for (float sample : samples) {
+            if (sample == 0.0f) continue;
+            if (!Float.isFinite(sample) || Math.abs(sample) > onePcm16Step || ++nonzero > 1) {
+                return false;
+            }
+        }
+        if (nonzero == 1) {
+            Arrays.fill(samples, 0.0f);
+            return true;
+        }
+        return false;
+    }
+
 	@Override	
 	public boolean process(AudioEvent audioEvent) {
 		//clone since the buffer is reused to slide
 		float[] buffer = audioEvent.getFloatBuffer().clone();
+        suppressIsolatedQuantizationImpulse(buffer);
 		
 		//calculate the fft
 		fft.forwardTransform(buffer);

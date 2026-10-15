@@ -1,0 +1,3 @@
+import pathlib,json,subprocess,re
+p=pathlib.Path('/home/bekzat/refine-replay-20261008');s=json.loads((p/'status.json').read_text());print(json.dumps(s));r=subprocess.run(['docker','logs','--tail','10000',s['container_id']],capture_output=True,text=True);logs=r.stdout+r.stderr
+qs=[float(v) for v in re.findall(r'Query for \d+ prints, \d+ matches in ([\d.]+) s',logs)];print(json.dumps({'lookup_count':len(qs),'lookup_mean_s':sum(qs)/len(qs) if qs else None,'lookup_max_s':max(qs) if qs else None,'errors':{k:logs.count(k) for k in ['SEVERE','OutOfMemoryError','SocketTimeoutException','Exception in thread']},'complete_lines':[l for l in logs.splitlines() if 'PROBE_COMPLETE' in l]}))
