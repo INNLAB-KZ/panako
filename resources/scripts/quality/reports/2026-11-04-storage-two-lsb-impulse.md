@@ -67,6 +67,20 @@ The general `latest` tag and the Stage-1/refine fleet were not redeployed.
 Production queue recovery is observed through normal consumption/reclaim;
 no manual Redis writes, ACKs, or deletions were used.
 
+## Production outcome
+
+At 09:50:43 UTC, all nine previously pending messages for the affected track
+had completed through normal worker consumption and reclaim. One response was
+`ok` with 15,096 fingerprints and duration 248.9 seconds; eight responses were
+`already_exists`. Pending count was zero. Another storage request also completed
+successfully during this observation period.
+
+For approximately ten minutes after deployment, health remained 200, restart
+count stayed zero, and neither heap OOM errors nor OOM-killed state appeared.
+Final container memory was 1.147 GiB out of the unchanged 8 GiB limit. Detailed
+observations and `production-pass.json` are retained in the protected incident
+directory and ignored local build directory, outside Git.
+
 ## Rollback
 
 Protected deployment backups are in `/home/bekzat/storage-fix-20261104` on the
@@ -74,4 +88,5 @@ storage host. Restore `compose-before-private.json` to the original Compose
 path after draining the candidate, then recreate only `store` using project
 `panako-storage-recovery-20261014`, with `--no-deps --no-build --pull never`.
 The old image is retained, but restoring it also restores this known OOM defect.
-Do not reuse a drain helper until its JAR validation includes the candidate.
+The incident directory's `drain-control.py` validates both the old and candidate
+JAR hashes and supports cooperative drain/status/resume for rollback.
