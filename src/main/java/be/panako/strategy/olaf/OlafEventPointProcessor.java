@@ -54,6 +54,9 @@ import be.tarsos.dsp.util.fft.HammingWindow;
  * A TarsosDSP AudioProcessor which steps through the audio and returns peaks in the spectrogram.
  */
 public class OlafEventPointProcessor implements AudioProcessor {
+	// Fail the task rather than exhausting the JVM on degenerate peak combinations.
+	private static final int MAX_FINGERPRINTS = 2_000_000;
+	private final int maxFingerprints;
 
 	private final FFT fft;
 		
@@ -97,6 +100,12 @@ public class OlafEventPointProcessor implements AudioProcessor {
 	 * @param fftSize The size of the fft
 	 */
 	public OlafEventPointProcessor(final int fftSize){
+		this(fftSize, MAX_FINGERPRINTS);
+	}
+
+	OlafEventPointProcessor(final int fftSize, final int maxFingerprints){
+		if (maxFingerprints < 1) throw new IllegalArgumentException("Fingerprint limit must be positive");
+		this.maxFingerprints = maxFingerprints;
 		fft = new FFT(fftSize, new HammingWindow());		
 		
 		magnitudesIndex=0;
@@ -163,19 +172,19 @@ public class OlafEventPointProcessor implements AudioProcessor {
 	}
 	
     /**
-     * A single one-LSB sample in an otherwise silent PCM16 analysis frame has
+     * A single one- or two-LSB sample in an otherwise silent PCM16 analysis frame has
      * an almost flat spectrum. Round-off turns that spectrum into hundreds of
      * equal local maxima, whose triples can produce millions of fingerprints.
-     * Only this isolated quantization-floor impulse is suppressed. Frames with
+     * Only this isolated near-quantization-floor impulse is suppressed. Frames with
      * two nonzero samples or any stronger sample are left byte-for-byte intact.
      */
     static boolean suppressIsolatedQuantizationImpulse(float[] samples) {
         // TarsosDSP's signed PCM16 decoder normalizes by 32767, not 32768.
-        final float onePcm16Step = 1.0f / 32767.0f;
+        final float maxImpulse = 2.0f / 32767.0f;
         int nonzero = 0;
         for (float sample : samples) {
             if (sample == 0.0f) continue;
-            if (!Float.isFinite(sample) || Math.abs(sample) > onePcm16Step || ++nonzero > 1) {
+            if (!Float.isFinite(sample) || Math.abs(sample) > maxImpulse || ++nonzero > 1) {
                 return false;
             }
         }
@@ -290,6 +299,15 @@ public class OlafEventPointProcessor implements AudioProcessor {
 		packEventPointsIntoFingerprints();
 	}
 
+	private void checkFingerprintCapacity() {
+		if (fingerprints.size() >= maxFingerprints) {
+			// Never expose a truncated result if extraction fails.
+			fingerprints.clear();
+			throw new IllegalStateException("OLAF fingerprint limit exceeded (" + maxFingerprints
+					+ "); audio contains excessive spectral peak combinations");
+		}
+	}
+
 	/**
 	 * Returns the extracted fingerprints.
 	 * @return Returns the extracted fingerprints.
@@ -332,6 +350,7 @@ public class OlafEventPointProcessor implements AudioProcessor {
 				if(fDiff > maxFreqDistance ) continue;
 
 				OlafFingerprint fingerprint;
+				checkFingerprintCapacity();
 				fingerprint = new OlafFingerprint(eventPoints.get(i),eventPoints.get(j),eventPoints.get(j));
 				fingerprints.add(fingerprint);
 			}
@@ -387,6 +406,7 @@ public class OlafEventPointProcessor implements AudioProcessor {
 					if(fDiff > maxFreqDistance ) continue;
 					
 					OlafFingerprint fingerprint;
+					checkFingerprintCapacity();
 					fingerprint = new OlafFingerprint(eventPoints.get(i),eventPoints.get(j),eventPoints.get(k));
 					fingerprints.add(fingerprint);
 				}
