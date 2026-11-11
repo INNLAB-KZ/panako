@@ -85,6 +85,7 @@ public class PanakoHttpServer {
 		// Register endpoints (health is public, everything else requires API key)
 		server.createContext("/api/v1/health", new HealthHandler());
 		server.createContext("/api/v1/stats", new ApiKeyFilter(new StatsHandler(strategy)));
+		server.createContext("/api/v1/index/status", new ApiKeyFilter(new IndexStatusHandler()));
 		server.createContext("/api/v1/store/fingerprints", new ApiKeyFilter(new StoreFingerprintsHandler(writeLock)));
 		server.createContext("/api/v1/store/rename", new ApiKeyFilter(new RenameMetadataHandler()));
 		server.createContext("/api/v1/store/url", new ApiKeyFilter(new StoreUrlHandler(strategy, writeLock, maxUploadSizeMB)));
@@ -120,6 +121,7 @@ public class PanakoHttpServer {
 		System.out.printf("  POST /api/v1/delete/by_id — delete fingerprints by resource_id (JSON)%n");
 		System.out.printf("  POST /api/v1/delete/by_ids — delete up to 100 resource_ids in one call (JSON)%n");
 		System.out.printf("  GET  /api/v1/stats       — database statistics%n");
+		System.out.printf("  GET  /api/v1/index/status — verify OLAF ClickHouse index presence by identifier%n");
 		System.out.printf("  GET  /api/v1/health      — health check%n");
 
 		// Add shutdown hook
