@@ -243,8 +243,11 @@ existing store endpoints can trust positive metadata, so blindly retrying
 `store/url` may return `already_exists` without repairing missing fingerprints.
 OLAF writes the `incomplete_store` placeholder before the first chunk of audio longer
 than five minutes, so this state is expected while such a store runs. Treat it as
-pending: confirm that no store task for the resource is in flight before any repair,
-and do not report it as an index failure while a task is running.
+pending, and do not report it as an index failure while a task is running. A normal
+store request repairs a placeholder left by an interrupted store: it deletes the
+placeholder and partial fingerprints, then stores again. For the same reason, send
+that request only after confirming that no store task for the resource is in flight,
+or it can delete rows that the running store is still writing.
 This endpoint never mutates data or publishes queue messages.
 
 ### `POST /api/v1/store/url`
