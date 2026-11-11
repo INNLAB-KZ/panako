@@ -199,6 +199,49 @@ If the uploaded file is 0 bytes, no indexing happens:
 
 All status responses (`ok`, `already_exists`, `already_indexed_match`, `skipped_empty`) are HTTP **200 OK**. Only `400`/`500` indicate real errors.
 
+### `GET /api/v1/index/status?identifier=2027580415`
+
+Read-only verification of an OLAF ClickHouse resource. Requires the usual API key.
+`identifier` must be a positive signed 32-bit integer. Use the stored canonical
+`panako_identifier` when a submitted ISRC was linked to another recording.
+
+```json
+{"status":"ok","identifier":2027580415,"indexed":true,"state":"indexed"}
+```
+
+HTTP 200 states:
+
+| State | `indexed` | Meaning |
+|---|---|---|
+| `indexed` | true | Valid metadata and at least one physical fingerprint row exist. |
+| `missing_metadata` | false | No active metadata; the resource is not eligible for recognition. |
+| `invalid_metadata` | false | Metadata has an empty path, invalid duration or non-positive fingerprint count. |
+| `missing_fingerprints` | false | Metadata claims an index but no fingerprint rows exist. |
+
+This is a presence check, not a complete fingerprint-count or recognition-quality audit.
+An absent metadata row returns immediately; otherwise the endpoint checks actual
+fingerprints and rechecks metadata after the scan. Concurrent writes can change
+the index after any response; callers still need idempotent store tasks.
+
+HTTP 503 means **unknown**, never absent: database error, timeout, or another
+verification in progress. It includes `Retry-After: 5` and no `indexed` field.
+Do not clear indexing flags, enqueue repairs, or return `ALREADY_INDEXED` on 503,
+network errors, authentication errors, invalid responses or an old server's 404.
+HTTP 400 rejects invalid identifiers; 501 means unsupported strategy/storage.
+Responses use `Cache-Control: no-store`.
+
+Fingerprint rows are sorted by hash. The presence query may scan a large table;
+it is limited to two threads, 15 seconds per SQL statement, 256 MiB query memory
+and one concurrent check per API process. Limit caller concurrency and retry with
+backoff. Do not call this endpoint once per catalog item for bulk reconciliation.
+
+For `missing_metadata`, normal validated ingestion can restore a resource after
+checking intentional exclusions and pending delete/store operations. For
+`invalid_metadata` or `missing_fingerprints`, use a controlled repair workflow:
+existing store endpoints can trust positive metadata, so blindly retrying
+`store/url` may return `already_exists` without repairing missing fingerprints.
+This endpoint never mutates data or publishes queue messages.
+
 ### `POST /api/v1/store/url`
 
 Store audio fingerprints by downloading from a URL. Accepts `application/json`.
