@@ -215,6 +215,7 @@ HTTP 200 states:
 |---|---|---|
 | `indexed` | true | Valid metadata and at least one physical fingerprint row exist. |
 | `missing_metadata` | false | No active metadata; the resource is not eligible for recognition. |
+| `incomplete_store` | false | Placeholder metadata with zero duration and zero fingerprints. A store may still be running, may have been interrupted, or may have produced no fingerprints. |
 | `invalid_metadata` | false | Metadata has an empty path, invalid duration or non-positive fingerprint count. |
 | `missing_fingerprints` | false | Metadata claims an index but no fingerprint rows exist. |
 
@@ -240,6 +241,10 @@ checking intentional exclusions and pending delete/store operations. For
 `invalid_metadata` or `missing_fingerprints`, use a controlled repair workflow:
 existing store endpoints can trust positive metadata, so blindly retrying
 `store/url` may return `already_exists` without repairing missing fingerprints.
+OLAF writes the `incomplete_store` placeholder before the first chunk of audio longer
+than five minutes, so this state is expected while such a store runs. Treat it as
+pending: confirm that no store task for the resource is in flight before any repair,
+and do not report it as an index failure while a task is running.
 This endpoint never mutates data or publishes queue messages.
 
 ### `POST /api/v1/store/url`
