@@ -21,7 +21,7 @@ public final class IndexStatusHandler implements HttpHandler {
     private static final String LIMITS = " SETTINGS max_threads=2, max_execution_time=15,"
             + " max_memory_usage=268435456, timeout_overflow_mode='throw', read_overflow_mode='throw'";
 
-    enum State { INDEXED, MISSING_METADATA, INVALID_METADATA, MISSING_FINGERPRINTS }
+    enum State { INDEXED, MISSING_METADATA, INCOMPLETE_STORE, INVALID_METADATA, MISSING_FINGERPRINTS }
 
     @FunctionalInterface
     interface Lookup { State check(int identifier) throws SQLException; }
@@ -108,8 +108,12 @@ public final class IndexStatusHandler implements HttpHandler {
                 if (!rows.next()) return State.MISSING_METADATA;
                 String path = rows.getString(1);
                 double duration = rows.getDouble(2);
+                int fingerprints = rows.getInt(3);
+                // Chunked OLAF stores write a (0, 0) placeholder before the first chunk. It stays
+                // while the store runs, after an interrupted store, or when no fingerprints resulted.
+                if (duration == 0 && fingerprints == 0) return State.INCOMPLETE_STORE;
                 return path != null && !path.isEmpty() && Double.isFinite(duration)
-                        && duration > 0 && rows.getInt(3) > 0 ? State.INDEXED : State.INVALID_METADATA;
+                        && duration > 0 && fingerprints > 0 ? State.INDEXED : State.INVALID_METADATA;
             }
         }
     }

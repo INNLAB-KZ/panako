@@ -23,11 +23,12 @@ class IndexStatusClickHouseTest {
                  Statement statement = connection.createStatement()) {
                 statement.execute("CREATE TABLE olaf_metadata (resource_id Int64,path String,duration Float32,num_fingerprints Int32) ENGINE=ReplacingMergeTree ORDER BY resource_id");
                 statement.execute("CREATE TABLE olaf_fingerprints (hash Int64,resource_id Int32,t1 Int32) ENGINE=MergeTree ORDER BY hash");
-                statement.execute("INSERT INTO olaf_metadata VALUES (1,'original.m4a',356,2),(2,'stale.m4a',356,2474),(3,'invalid.m4a',0,1)");
+                statement.execute("INSERT INTO olaf_metadata VALUES (1,'original.m4a',356,2),(2,'stale.m4a',356,2474),(3,'invalid.m4a',0,1),(6,'placeholder.m4a',0,0)");
                 statement.execute("INSERT INTO olaf_fingerprints VALUES (10,1,1),(11,1,2),(12,4,3)");
                 assertEquals(IndexStatusHandler.State.INDEXED, IndexStatusHandler.check(connection, 1));
                 assertEquals(IndexStatusHandler.State.MISSING_FINGERPRINTS, IndexStatusHandler.check(connection, 2));
                 assertEquals(IndexStatusHandler.State.INVALID_METADATA, IndexStatusHandler.check(connection, 3));
+                assertEquals(IndexStatusHandler.State.INCOMPLETE_STORE, IndexStatusHandler.check(connection, 6));
                 assertEquals(IndexStatusHandler.State.MISSING_METADATA, IndexStatusHandler.check(connection, 4));
                 assertEquals(IndexStatusHandler.State.MISSING_METADATA, IndexStatusHandler.check(connection, 5));
                 statement.execute("DROP TABLE olaf_fingerprints");
